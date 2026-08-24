@@ -1,0 +1,151 @@
+#!/bin/bash
+# piboy-fand - fan curve and status policy for the PiBoy DMG.
+#
+# What this deliberately does NOT do any more:
+#   volume        - piboy-vold consumes the ABS_VOLUME input device
+#   shutdown      - the driver reports KEY_POWER, logind acts on it, and the
+#                   driver arms an orderly_poweroff() backstop. Neither of those
+#                   depends on this daemon being alive.
+#   LED animation - the kernel LED class blinks it; we only choose a trigger.
+#
+# What remains is one job: sample sensors every few seconds, set fan duty and LED
+# trigger, and push low-battery notices to a running game. Nothing here is
+# time-critical, so this is a plain 5s loop with no tick machinery.
+
+LEDDIR=/sys/class/leds/piboy:green:status   # LED class (kernel animates it)
+PSY=/sys/class/power_supply/xpi-battery     # standard battery interface
+STAT=/sys/kernel/xpi_gamecon/status         # vendor node; no standard equivalent
+
+INTERVAL=5
+
+# Prefer the hwmon pwm1 the driver registers; fall back to the vendor node so a
+# rolled-back module still works. Re-resolvable: the hwmonN index changes if the
+# module is reloaded, and a path fixed at startup would then fail forever.
+resolve_fan() {
+    FAN=/sys/kernel/xpi_gamecon/fan
+    local h
+    for h in /sys/class/hwmon/hwmon*; do
+        [ -r "$h/name" ] || continue
+        if [ "$(<"$h/name")" = "piboy" ] && [ -w "$h/pwm1" ]; then FAN=$h/pwm1; return; fi
+    done
+}
+resolve_fan
+
+# Resolve the CPU thermal zone by type rather than trusting zone ordering.
+TEMP=
+for z in /sys/class/thermal/thermal_zone*; do
+    [ -r "$z/type" ] || continue
+    if [ "$(<"$z/type")" = "cpu-thermal" ]; then TEMP=$z/temp; break; fi
+done
+[ -n "$TEMP" ] || TEMP=/sys/class/thermal/thermal_zone0/temp
+
+# millidegrees:duty, high to low. Vendor osd.cfg bands plus a 100% top band.
+FAN_CURVE="78000:255 75000:191 70000:128 65000:102 60000:77 55000:51 50000:26"
+FAN_HYST=3500        # measured idle temp swing is ~2400; less than that flaps
+
+BATT_WARN="5 10 15 25"   # low to high; first match wins
+BATT_CRIT=5
+LED_NORMAL=100
+
+RA_HOST=127.0.0.1
+RA_PORT=55355
+
+duty_for() {   # millidegrees -> $duty (0..255)
+    local band
+    duty=0
+    for band in $FAN_CURVE; do
+        if (( $1 >= ${band%%:*} )); then duty=${band#*:}; return; fi
+    done
+}
+
+ra_notify() {  # push an OSD message into RetroArch if it is listening
+    exec 3<>"/dev/udp/${RA_HOST}/${RA_PORT}" 2>/dev/null || return 0
+    printf "SHOW_MSG %s" "$1" >&3 2>/dev/null
+    exec 3>&-
+}
+
+[ -w "$FAN" ] || { echo "piboy-fand: $FAN not writable (is xpi_gamecon loaded?)" >&2; exit 1; }
+[ -d "$LEDDIR" ] || echo "piboy-fand: $LEDDIR missing - LED status disabled" >&2
+
+trap 'echo 64 > "$FAN" 2>/dev/null; echo $LED_NORMAL > "$LEDDIR/brightness" 2>/dev/null; exit 0' TERM INT
+
+last_duty=-1; last_trig=; last_stat=-1; warned=999
+
+while true; do
+    t=$(<"$TEMP") || t=60000
+    pct=$(<"$PSY/capacity") || pct=100
+    chg=$(<"$PSY/status")   || chg=Unknown
+
+    # --- fan, with downward hysteresis so a dithering temp cannot flap bands ---
+    duty_for "$t"
+    (( last_duty >= 0 && duty < last_duty )) && duty_for $(( t + FAN_HYST ))
+    # Write every cycle, not only on change: the driver raises the fan to a safe
+    # floor if nobody has written pwm1 for ~30s (so a dead governor cannot leave
+    # the fan stuck). A change-gated write would let that watchdog override us
+    # whenever the temperature is stable. The write is a builtin - no fork.
+    if echo "$duty" > "$FAN" 2>/dev/null; then
+        if (( duty != last_duty )); then
+            last_duty=$duty
+            echo "temp=${t}m fan=${duty}/255 batt=${pct}% ${chg}"
+        fi
+    else
+        # The hwmon index can move under us (module reload). Re-resolve once and
+        # retry before complaining, rather than logging every 5s forever.
+        echo "piboy-fand: write to $FAN failed - re-resolving" >&2
+        resolve_fan
+        echo "$duty" > "$FAN" 2>/dev/null || \
+            echo "piboy-fand: FAILED to write fan duty ${duty} to $FAN" >&2
+    fi
+
+    # --- low-battery warning, pushed to the game's OSD ---
+    if [ "$chg" = "Discharging" ]; then
+        hit=
+        for th in $BATT_WARN; do
+            (( pct <= th && warned > th )) && { hit=$th; break; }
+        done
+        if [ -n "$hit" ]; then
+            if (( hit <= BATT_CRIT )); then
+                ra_notify "BATTERY CRITICAL - ${pct}% - save now"
+            else
+                ra_notify "Battery low - ${pct}%"
+            fi
+            echo "low battery warning at ${pct}% (threshold ${hit})"
+            warned=$hit
+        fi
+    fi
+    # Rearm once the pack recovers well above the last warned band, regardless of
+    # charge direction: a handheld often sits below 30% while still discharging,
+    # and gating this on !discharging silently disables all further warnings.
+    (( pct > warned + 10 )) && warned=999
+
+    # --- status LED: pick a kernel trigger; the LED class does the animating ---
+    if   (( pct < 10 )); then want="timer:120"
+    elif (( pct < 25 )); then want="timer:500"
+    elif [ "$chg" = "Charging" ]; then want="xpi-battery-charging"
+    else                       want="none"
+    fi
+    if [ "$want" != "$last_trig" ]; then
+        echo "${want%%:*}" > "$LEDDIR/trigger" 2>/dev/null
+        case "$want" in
+            timer:*)
+                echo "${want#*:}" > "$LEDDIR/delay_on"  2>/dev/null
+                echo "${want#*:}" > "$LEDDIR/delay_off" 2>/dev/null ;;
+            none)
+                # setting a trigger clears brightness, so restore it
+                echo "$LED_NORMAL" > "$LEDDIR/brightness" 2>/dev/null ;;
+        esac
+        last_trig=$want
+        echo "LED trigger -> $want"
+    fi
+
+    # --- XPi status byte, diagnostics only ---
+    # Compare only VBus|Shutdown (0xC0): VSTAT1/2 are charger state-machine bits
+    # that chatter near a charge threshold and would otherwise spam the journal.
+    st=$(<"$STAT")
+    if [ -n "$st" ] && (( (st & 0xC0) != (last_stat & 0xC0) )); then
+        (( last_stat >= 0 )) && printf "XPi status 0x%02X -> 0x%02X\n" "$last_stat" "$st"
+        last_stat=$st
+    fi
+
+    sleep "$INTERVAL"
+done

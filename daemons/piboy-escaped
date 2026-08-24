@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""piboy-escaped - Start+Select escape hatch for console emulators.
+
+RetroArch already exits on Start+Select, but emulators launched with the CON:
+prefix (frotz, and anything else console-based) never see a RetroArch hotkey -
+there is no way out of them with a gamepad, and the only remaining option is a
+power cycle. On a device where every unclean shutdown risks the filesystem, that
+is the one exit path worth removing.
+
+Deliberately narrow, so it can never interfere with normal play:
+  * fires ONLY while runcommand.sh is running - never on the EmulationStation
+    menu, where Start and Select are ordinary buttons
+  * a 2s hold fires ONLY when RetroArch is absent - RetroArch keeps handling
+    its own hotkey (Select+Start is literally its exit combo on this pad), and a
+    second killer racing it would be worse than useless
+  * a 5s hold fires REGARDLESS. A RetroArch stuck in uninterruptible I/O - which
+    happens when something else saturates the card - processes no input at all,
+    so deferring to its hotkey means deferring to nothing and the only way out
+    is cutting power. That is the exact failure this daemon exists to remove.
+  * requires the combo to be HELD. Most ports run standalone, not under
+    RetroArch, so this daemon is what catches them - and in those games Start is
+    an ordinary menu button. An instant trigger would kill Duke Nukem or Quake 3
+    the moment someone pressed both. A deliberate hold cannot collide with play.
+  * SIGTERM, then SIGKILL after a grace period, so the emulator gets its chance
+    to save and restore the terminal
+
+Watches evdev codes rather than joystick button indices, so it works for the
+PiBoy pad and a plugged-in USB pad without per-device configuration.
+"""
+import ctypes, fcntl, os, glob, select, signal, struct, sys, time
+
+EV_SYN      = 0x00
+EV_KEY      = 0x01
+BTN_SELECT  = 0x13a
+BTN_START   = 0x13b
+EV_SIZE     = struct.calcsize('llHHi')      # 24 bytes on 64-bit
+GRACE       = 3.0                           # seconds between SIGTERM and SIGKILL
+HOLD        = 2.0                           # console emulators: RetroArch absent
+HOLD_FORCE  = 5.0                           # anything, including a wedged RetroArch
+SHELLS      = {'bash', 'sh', 'dash', 'runcommand.sh'}
+
+def log(msg):
+    print(f"piboy-escaped: {msg}", flush=True)
+
+def snapshot():
+    """One pass over /proc -> {pid: (ppid, comm, cmdline)}.
+
+    Everything escape() needs - runcommand detection, RetroArch detection, the
+    descendant walk and the log names - comes out of this single sweep. The
+    previous shape re-listed /proc once per frontier node and walked cmdlines
+    twice more, which is thousands of file opens at exactly the moment the card
+    is already saturated enough that RetroArch has wedged.
+    """
+    procs = {}
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                # comm can contain spaces and ')'; fields after the final ')'
+                # are fixed-width, so split there rather than on whitespace.
+                ppid = int(f.read().rsplit(')', 1)[1].split()[1])
+            with open(f'/proc/{pid}/comm') as f:
+                comm = f.read().strip()
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                cmdline = f.read()
+        except (OSError, ValueError, IndexError):
+            continue
+        procs[pid] = (ppid, comm, cmdline)
+    return procs
+
+
+def descendants(procs, root):
+    """Every pid below root, from an already-taken snapshot."""
+    children = {}
+    for pid, (ppid, _, _) in procs.items():
+        children.setdefault(ppid, []).append(pid)
+    out, frontier = [], [root]
+    while frontier:
+        for pid in children.get(frontier.pop(), ()):
+            out.append(pid)
+            frontier.append(pid)
+    return out
+
+
+def escape(force=False):
+    """Returns True if it acted, False if it deliberately declined."""
+    procs = snapshot()
+    # Match only a shell actually executing runcommand.sh, not anything whose
+    # cmdline merely mentions it (an editor, a grep, this daemon's own args), and
+    # take the newest so a nested invocation from a +Start launcher wins over its
+    # parent. dict order is not launch order, so rc[0] was arbitrary.
+    rc = sorted(p for p, (_, comm, cmd) in procs.items()
+                if b'runcommand.sh' in cmd and comm in SHELLS)
+    if not rc:
+        return False                            # nothing launched; ES is in charge
+    if not force and any(b'retroarch' in cmd for _, _, cmd in procs.values()):
+        return False                            # RetroArch handles its own hotkey
+
+    targets = [p for p in descendants(procs, rc[-1]) if procs[p][1] not in SHELLS]
+    if not targets:
+        return False
+    log(f"Start+Select: terminating {[(p, procs[p][1]) for p in targets]}")
+    for p in targets:
+        try: os.kill(p, signal.SIGTERM)
+        except OSError: pass
+    deadline = time.time() + GRACE
+    while time.time() < deadline:
+        if not any(os.path.exists(f'/proc/{p}') for p in targets):
+            log("exited cleanly")
+            return True
+        time.sleep(0.2)
+    # A process wedged in uninterruptible I/O ignores SIGTERM entirely.
+    for p in targets:
+        try:
+            os.kill(p, signal.SIGKILL)
+            log(f"pid {p} ignored SIGTERM - killed")
+        except OSError:
+            pass
+    return True
+
+
+# EVIOCSMASK = _IOW('E', 0x93, struct input_mask{u32 type; u32 size; u64 ptr})
+EVIOCSMASK = 0x40104593
+
+
+def _set_mask(fd, ev_type, mask):
+    """Ask the kernel to deliver only the bits set in mask for ev_type."""
+    buf = ctypes.create_string_buffer(bytes(mask), len(mask))
+    req = struct.pack('IIQ', ev_type, len(mask), ctypes.addressof(buf))
+    fcntl.ioctl(fd, EVIOCSMASK, req)      # buf stays referenced until this returns
+
+
+def filter_to_buttons(fd):
+    """Deliver only BTN_SELECT/BTN_START presses on this fd.
+
+    The PiBoy pad syncs on a 125Hz timer, so an unfiltered fd wakes this daemon
+    ~20 times a second forever on EV_ABS/EV_SYN traffic it does not care about.
+    Masking at the kernel means the process sleeps until one of the two buttons
+    it actually watches changes state. Best-effort: older kernels and some
+    drivers reject EVIOCSMASK, and an unfiltered fd still works correctly.
+    """
+    try:
+        type_mask = bytearray(8)                       # which EV_* types at all
+        type_mask[EV_KEY // 8] |= 1 << (EV_KEY % 8)
+        _set_mask(fd, EV_SYN, type_mask)
+
+        code_mask = bytearray(96)                      # which keys within EV_KEY
+        for code in (BTN_SELECT, BTN_START):
+            code_mask[code // 8] |= 1 << (code % 8)
+        _set_mask(fd, EV_KEY, code_mask)
+        return True
+    except OSError:
+        return False
+
+
+def open_pads():
+    fds, masked = {}, 0
+    for path in sorted(glob.glob('/dev/input/event*')):
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            continue
+        if filter_to_buttons(fd):
+            masked += 1
+        fds[fd] = path
+    return fds, masked
+
+def main():
+    running = True
+
+    # A self-pipe registered with set_wakeup_fd. Without it, blocking in
+    # select() with timeout=None is uninterruptible in practice: PEP 475 runs the
+    # handler and then RESTARTS the syscall with the same (None) timeout, so
+    # `running = False` is never observed and systemd waits out TimeoutStopSec
+    # before SIGKILL. On this hardware that matters - the XPi cuts the rail about
+    # 31s after a shutdown request, so a daemon that stalls shutdown risks being
+    # killed mid-unmount.
+    wake_r, wake_w = os.pipe()
+    os.set_blocking(wake_r, False)
+    os.set_blocking(wake_w, False)
+    signal.set_wakeup_fd(wake_w)
+
+    def stop(*_):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    fds, masked = open_pads()
+    log(f"watching {len(fds)} input devices ({masked} kernel-filtered to Start/Select); "
+        f"{HOLD:.0f}s to escape, {HOLD_FORCE:.0f}s to force")
+    held = {}                                   # fd -> set of codes currently down
+    armed = True                                # require release before re-firing
+    since = None                                # when the combo became complete
+    next_try = 0.0                              # backoff for declined soft escapes
+
+    while running:
+        # Block indefinitely when no combo is in progress: the 0.25s poll only
+        # exists to time a hold, and there is nothing to time until both buttons
+        # are down. Idle cost drops to zero wakeups - the daemon sleeps until an
+        # actual input event arrives - without giving up always-being-there,
+        # which an on-demand daemon started from runcommand hooks cannot promise.
+        # Never block indefinitely with no devices open - that would be a
+        # permanently dead daemon with no path to recovery.
+        timeout = 0.25 if since is not None else (None if fds else 2.0)
+        try:
+            ready, _, _ = select.select(list(fds) + [wake_r], [], [], timeout)
+        except (select.error, OSError):
+            for fd in list(fds):
+                os.close(fd)
+                held.pop(fd, None)         # stale button state must not outlive its fd
+            fds, _ = open_pads()
+            continue
+
+        if wake_r in ready:
+            try: os.read(wake_r, 64)       # drain; the flag is already set
+            except OSError: pass
+            ready = [f for f in ready if f != wake_r]
+            if not running:
+                break
+
+        for fd in ready:
+            try:
+                data = os.read(fd, EV_SIZE * 64)
+            except OSError:
+                # Drop the recorded button state with the fd. A stale entry that
+                # still had both buttons down would latch `complete` True for the
+                # process lifetime: `since` never resets, `armed` never returns,
+                # and the escape hatch can never fire again.
+                os.close(fd); fds.pop(fd, None); held.pop(fd, None)
+                continue
+            for off in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
+                _, _, etype, code, value = struct.unpack('llHHi', data[off:off + EV_SIZE])
+                if etype != EV_KEY or code not in (BTN_SELECT, BTN_START):
+                    continue
+                s = held.setdefault(fd, set())
+                if value:                        # press or autorepeat
+                    s.add(code)
+                else:
+                    s.discard(code)
+
+        # Evaluate the hold on every pass, not only on an event: autorepeat is
+        # not guaranteed, so a held combo may produce no further events at all.
+        complete = any(BTN_SELECT in v and BTN_START in v for v in held.values())
+        if not complete:
+            since, armed, next_try = None, True, 0.0
+        elif since is None:
+            since, next_try = time.time(), 0.0
+        elif armed:
+            now = time.time()
+            elapsed = now - since
+            if elapsed >= HOLD_FORCE:
+                log("held %.0fs - forcing, even past RetroArch" % HOLD_FORCE)
+                escape(force=True)
+                armed = False
+            elif elapsed >= HOLD and now >= next_try:
+                # A decline means RetroArch is up and owns the short hold. Back
+                # off rather than re-walking /proc four times a second while the
+                # card is already struggling - the force tier still lands on time.
+                if escape(force=False):
+                    armed = False
+                else:
+                    next_try = now + 1.0
+
+    for fd in fds:
+        os.close(fd)
+    log("stopped")
+
+if __name__ == '__main__':
+    sys.exit(main())

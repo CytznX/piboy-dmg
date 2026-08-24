@@ -1,0 +1,17 @@
+[Unit]
+Description=PiBoy DMG Start+Select escape hatch for console emulators
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/piboy-escaped
+Restart=on-failure
+RestartSec=5
+# Runs as the console user, not root: the emulators it must signal are that
+# user's processes, and reading /dev/input needs only the input group.
+User=$PI_USER
+SupplementaryGroups=input
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

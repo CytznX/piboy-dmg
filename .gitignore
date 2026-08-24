@@ -1,0 +1,32 @@
+# build artefacts
+__pycache__/
+*.pyc
+*.o
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+.tmp_versions/
+
+# editor / working files
+*.pre-*
+*.orig-backup
+*.bak
+*~
+
+# things that must never be committed: this project's provisioning file
+# carries a wifi PSK and a password hash. Keep the example, never the real one.
+custom.toml
+*.key
+id_*
+authorized_keys
+
+# private to one machine: disk images, their checksums, rom listings
+*.pcl
+*.pcl.zstd
+MANIFEST.txt
+capture.log
+verify-diff.txt
+duplicates-found.txt
+partition-table.sfdisk

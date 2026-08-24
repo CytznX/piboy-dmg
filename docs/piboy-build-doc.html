@@ -1,0 +1,1016 @@
+<title>PiBoy DMG 64-Bit Port</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    /* Game Boy DMG four-tone screen palette */
+    --dmg-1: #0F380F;
+    --dmg-2: #306230;
+    --dmg-3: #8BAC0F;
+    --dmg-4: #9BBC0F;
+
+    --ground:      #E7E9E1;
+    --surface:     #F5F7F0;
+    --surface-alt: #DFE2D8;
+    --edge:        #C6CBBB;
+    --edge-soft:   #D6DACC;
+
+    --ink:      #161D12;
+    --ink-body: #303A2A;
+    --ink-mute: #5F6957;
+    --ink-faint:#7C8672;
+
+    --accent:      #2C5C2C;
+    --accent-deep: #0F380F;
+    --accent-lit:  #6E8C0B;
+
+    --flag:      #8E2F45;
+    --flag-soft: #F0DDE2;
+    --flag-edge: #D9AEB9;
+
+    --ok:      #2C5C2C;
+    --ok-soft: #DCE6CE;
+
+    --code-bg:   #12180F;
+    --code-ink:  #D9E2CB;
+    --code-mute: #7F8C72;
+
+    --measure: 68ch;
+    --radius: 3px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E120C;
+      --surface:     #161B13;
+      --surface-alt: #1D2419;
+      --edge:        #2C3527;
+      --edge-soft:   #232B1F;
+
+      --ink:      #E2E8D8;
+      --ink-body: #C3CBB7;
+      --ink-mute: #8D9682;
+      --ink-faint:#6E7765;
+
+      --accent:      #9BBC0F;
+      --accent-deep: #B7D42F;
+      --accent-lit:  #8BAC0F;
+
+      --flag:      #E08099;
+      --flag-soft: #2B1620;
+      --flag-edge: #4D2836;
+
+      --ok:      #9BBC0F;
+      --ok-soft: #1E2618;
+
+      --code-bg:   #080B07;
+      --code-ink:  #CBD6BB;
+      --code-mute: #6E7A62;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0E120C;
+    --surface:     #161B13;
+    --surface-alt: #1D2419;
+    --edge:        #2C3527;
+    --edge-soft:   #232B1F;
+
+    --ink:      #E2E8D8;
+    --ink-body: #C3CBB7;
+    --ink-mute: #8D9682;
+    --ink-faint:#6E7765;
+
+    --accent:      #9BBC0F;
+    --accent-deep: #B7D42F;
+    --accent-lit:  #8BAC0F;
+
+    --flag:      #E08099;
+    --flag-soft: #2B1620;
+    --flag-edge: #4D2836;
+
+    --ok:      #9BBC0F;
+    --ok-soft: #1E2618;
+
+    --code-bg:   #080B07;
+    --code-ink:  #CBD6BB;
+    --code-mute: #6E7A62;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink-body);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 16.5px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.5rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 78ch;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  .col { max-width: var(--measure); }
+
+  /* ---- four-tone DMG rule, used as the page's one motif ---- */
+  .tones {
+    display: flex;
+    height: 5px;
+    width: 100%;
+    gap: 0;
+  }
+  .tones i { flex: 1; display: block; }
+  .tones i:nth-child(1) { background: var(--dmg-1); }
+  .tones i:nth-child(2) { background: var(--dmg-2); }
+  .tones i:nth-child(3) { background: var(--dmg-3); }
+  .tones i:nth-child(4) { background: var(--dmg-4); }
+
+  /* ---- masthead ---- */
+  header { padding-top: 4rem; display: flex; flex-direction: column; gap: 1.4rem; }
+
+  h1 {
+    font-family: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif;
+    font-weight: 700;
+    font-size: clamp(2.5rem, 7vw, 4rem);
+    line-height: 1.02;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 1.12rem;
+    color: var(--ink-mute);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  .meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.75rem;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    letter-spacing: 0.02em;
+  }
+  .meta b { color: var(--ink-mute); font-weight: 500; }
+
+  /* ---- sections ---- */
+  section { display: flex; flex-direction: column; gap: 1.1rem; }
+
+  h2 {
+    font-family: "IBM Plex Sans Condensed", sans-serif;
+    font-weight: 700;
+    font-size: 1.72rem;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: "IBM Plex Sans Condensed", sans-serif;
+    font-weight: 600;
+    font-size: 1.12rem;
+    color: var(--ink);
+    margin: 0.6rem 0 0;
+  }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.13em;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  p { margin: 0; max-width: var(--measure); }
+  p + p { margin-top: 0.9rem; }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  code {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.855em;
+    background: var(--surface-alt);
+    border: 1px solid var(--edge-soft);
+    border-radius: var(--radius);
+    padding: 0.08em 0.34em;
+    color: var(--ink);
+    word-break: break-word;
+  }
+
+  pre {
+    margin: 0;
+    background: var(--code-bg);
+    color: var(--code-ink);
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 0.82rem;
+    line-height: 1.65;
+    padding: 1.05rem 1.2rem;
+    border-radius: var(--radius);
+    overflow-x: auto;
+    border: 1px solid var(--edge);
+  }
+  pre code {
+    background: none; border: none; padding: 0;
+    color: inherit; font-size: inherit;
+  }
+  pre .c { color: var(--code-mute); }
+  pre .hl { color: var(--dmg-4); }
+
+  /* ---- traps ---- */
+  .trap {
+    border: 1px solid var(--edge);
+    border-left: 3px solid var(--flag);
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 1.15rem 1.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .trap h3 { margin: 0; color: var(--flag); }
+  .trap p { font-size: 0.95rem; }
+  .traps { display: flex; flex-direction: column; gap: 1rem; }
+
+  .note {
+    border: 1px solid var(--edge);
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 1.05rem 1.2rem;
+    font-size: 0.95rem;
+  }
+  .note.warn { border-left: 3px solid var(--flag); background: var(--flag-soft); border-color: var(--flag-edge); }
+  .note.warn strong { color: var(--flag); }
+
+  /* ---- numbered build steps: order is real, so it's marked ---- */
+  .steps { display: flex; flex-direction: column; gap: 2.4rem; counter-reset: step; list-style: none; padding: 0; margin: 0; }
+  .steps > li {
+    counter-increment: step;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    position: relative;
+    padding-left: 3.1rem;
+  }
+  .steps > li::before {
+    content: counter(step, decimal-leading-zero);
+    position: absolute;
+    left: 0;
+    top: 0.1rem;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--accent);
+    border: 1px solid var(--edge);
+    background: var(--surface);
+    border-radius: var(--radius);
+    width: 2.15rem;
+    height: 1.75rem;
+    display: grid;
+    place-items: center;
+  }
+  .steps h3 { margin: 0; font-size: 1.2rem; }
+
+  /* ---- tables ---- */
+  .tscroll { overflow-x: auto; border: 1px solid var(--edge); border-radius: var(--radius); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 0.62rem 0.9rem; border-bottom: 1px solid var(--edge-soft); vertical-align: top; }
+  thead th {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-mute);
+    font-weight: 500;
+    background: var(--surface-alt);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td code { white-space: nowrap; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  .pill {
+    display: inline-block;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    padding: 0.12rem 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--edge);
+    white-space: nowrap;
+  }
+  .pill.done { color: var(--ok); background: var(--ok-soft); border-color: var(--ok); }
+  .pill.open { color: var(--flag); background: var(--flag-soft); border-color: var(--flag-edge); }
+
+  footer {
+    border-top: 1px solid var(--edge);
+    padding-top: 1.5rem;
+    font-size: 0.88rem;
+    color: var(--ink-mute);
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  ul.plain { margin: 0; padding-left: 1.15rem; display: flex; flex-direction: column; gap: 0.45rem; max-width: var(--measure); }
+  ul.plain li::marker { color: var(--accent); }
+
+  @media (max-width: 620px) {
+    body { padding: 0 1.1rem 4rem; font-size: 16px; }
+    .steps > li { padding-left: 0; }
+    .steps > li::before { position: static; margin-bottom: 0.2rem; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="tones" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <div class="eyebrow">Build reference · unofficial</div>
+    <h1>PiBoy DMG 64-Bit Port</h1>
+    <p class="standfirst">Getting a PiBoy DMG onto 64-bit Raspberry Pi OS Trixie after Experimental Pi shut down — display, audio, controller driver, fan control and charging, rebuilt from the vendor's own settings — then migrated onto the card the handheld shipped with, and the game library and controls put back in order.</p>
+    <div class="meta">
+      <span><b>Hardware</b> Pi 4B rev 1.4, 8 GB</span>
+      <span><b>Target</b> Trixie arm64, kernel 6.18</span>
+      <span><b>From</b> RetroPie 4.8.12 / Buster, 32-bit</span>
+      <span><b>Verified</b> 22 Aug 2026</span>
+    </div>
+  </header>
+
+  <section>
+    <p>The vendor is gone, and its last official image — PiBoy DMG 1.0.7, June 2024 — is 32-bit RetroPie on an end-of-life Debian. There is no supported 64-bit path, and RetroPie itself has never shipped an official aarch64 image. Everything below was worked out by hand from the vendor's own <code>config.txt</code> and the GPL driver source left behind on the original card.</p>
+    <p>It works. The panel, audio, controls, battery telemetry and fan all come up from cold with no HDMI attached and no intervention.</p>
+
+    <div class="tscroll">
+      <table>
+        <thead>
+          <tr><th>Component</th><th>State</th><th>How</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>3.5″ DPI panel, 640×480</td><td><span class="pill done">working</span></td><td><code>vc4-kms-dpi-generic</code></td></tr>
+          <tr><td>HDMI, simultaneous</td><td><span class="pill done">working</span></td><td>stock</td></tr>
+          <tr><td>PWM audio</td><td><span class="pill done">working</span></td><td><code>audremap</code> GPIO 18/19</td></tr>
+          <tr><td>Controller, 15 buttons + 2 axes</td><td><span class="pill done">working</span></td><td><code>xpi_gamecon</code>, patched</td></tr>
+          <tr><td>Battery &amp; charge telemetry</td><td><span class="pill done">working</span></td><td><code>/sys/kernel/xpi_gamecon/</code></td></tr>
+          <tr><td>Fan control</td><td><span class="pill done">working</span></td><td><code>piboy-fand</code> (new)</td></tr>
+          <tr><td>Full 1800 MHz clock</td><td><span class="pill done">working</span></td><td><code>avoid_warnings=2</code></td></tr>
+          <tr><td>Speaker audio routing</td><td><span class="pill done">working</span></td><td><code>/etc/asound.conf</code></td></tr>
+          <tr><td>Hardware volume wheel</td><td><span class="pill done">working</span></td><td><code>piboy-vold</code> on evdev</td></tr>
+          <tr><td>Battery in ES / RetroArch</td><td><span class="pill done">working</span></td><td><code>power_supply</code> class</td></tr>
+          <tr><td>Status LED</td><td><span class="pill done">green only</span></td><td><code>leds</code> class + triggers</td></tr>
+          <tr><td>Fan as a standard control</td><td><span class="pill done">working</span></td><td><code>hwmon</code> <code>pwm1</code> + watchdog</td></tr>
+          <tr><td>Volume wheel as input</td><td><span class="pill done">working</span></td><td><code>ABS_VOLUME</code>, kernel fuzz</td></tr>
+          <tr><td>RetroArch + cores + ES</td><td><span class="pill done">working</span></td><td>built from source</td></tr>
+          <tr><td>In-game volume &amp; battery OSD</td><td><span class="pill done">working</span></td><td>RetroArch <code>SHOW_MSG</code></td></tr>
+          <tr><td><strong>Clean shutdown on power switch</strong></td><td><span class="pill done">working</span></td><td><code>KEY_POWER</code> → logind</td></tr>
+          <tr><td>Persistent status bar</td><td><span class="pill open">not done</span></td><td>needs a compositor</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Read this first</div>
+    <h2>Eleven traps that cost real time</h2>
+    <p>Each of these presents as a hardware fault. None of them is one.</p>
+
+    <div class="traps">
+      <div class="trap">
+        <h3>Nothing answers the power switch, so every shutdown is unclean</h3>
+        <p>The switch does not cut the rail directly. It tells the XPi, which asserts a shutdown request and then waits before killing power. The driver already decodes it — <code>stat_val = data[5]&amp;0xC6; //VBus,Shutdown,VSTAT2,VSTAT1</code> — but nothing acts on it, and no <code>gpio-shutdown</code> overlay exists (the vendor's config had none either; their closed <code>osd</code> binary was the listener).</p>
+        <p>Measured on this hardware: the bit is <strong><code>0x40</code>, active-low</strong>, and there are <strong>~31 seconds</strong> between the request and the rail dropping.</p>
+<pre><code>05:02:14  XPi status 198 -&gt; 134   (0xC6 -&gt; 0x86)   <span class="c">switch OFF</span>
+05:02:45  ...log simply stops...                    <span class="c">power cut</span>
+shutdown markers in that boot: 0</code></pre>
+        <p>Until something listens, <em>every</em> power-off corrupts a live filesystem — and a nudged or marginal switch looks exactly like a spontaneous power-off: full battery, normal temperature, no throttling flags.</p>
+        <p><strong>Do not solve this in a daemon.</strong> Polling the byte from userspace works, but only while that process is alive and scheduled — which it is not during early boot, in the restart window after a crash, after <code>systemctl stop</code>, or during a normal reboot when it is killed while the rail is still up. Report <code>KEY_POWER</code> from the driver instead and the whole problem moves into the kernel; see the build steps.</p>
+      </div>
+
+      <div class="trap">
+        <h3>Raspberry Pi OS silently forces volatile journald</h3>
+        <p><code>/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf</code> sets <code>Storage=volatile</code> to spare the SD card, and drop-ins beat <code>journald.conf</code>. So creating <code>/var/log/journal</code> and setting <code>Storage=persistent</code> in the main file <strong>appears to work and does nothing</strong> — journald even reports success while still writing to <code>/run</code>. Every crash keeps vanishing, and <code>journalctl -b -1</code> stays empty.</p>
+        <p>Override with a later-sorting drop-in in <code>/etc</code>, and cap the size since you are re-enabling flash writes the vendor deliberately disabled:</p>
+<pre><code><span class="c"># /etc/systemd/journald.conf.d/50-persistent.conf</span>
+[Journal]
+Storage=persistent
+SystemMaxUse=64M</code></pre>
+        <p>Verify with <code>journalctl --header | grep "File path"</code> — it must say <code>/var/log/journal</code>, not <code>/run/log/journal</code>. Do this <em>before</em> you need it.</p>
+      </div>
+
+      <div class="trap">
+        <h3>The board runs permanently under-voltage — and the vendor hid it</h3>
+        <p>The XPi's boost converter cannot hold the 4.63 V the Pi's under-voltage comparator expects; that detector is calibrated for a wall supply, not a battery handheld. The vendor's answer was <code>avoid_warnings=2</code>, which does not merely suppress the warning icon — it <strong>disables the firmware's throttling response</strong>. Omit it and the firmware parks the SoC at its 600 MHz floor and never releases it.</p>
+        <p>Measured on a stock 1800 MHz config: <strong>6436 ms clamped versus 2295 ms with the setting restored — 2.8× — </strong>and <code>throttled</code> goes from <code>0x50005</code> to a clean <code>0x0</code>. It presents perfectly as a bad PSU or cable. It is neither, and no supply will fix it.</p>
+        <p>An <a href="https://github.com/raspberrypi/firmware/issues/1834">open firmware issue</a> reports the setting failing on Bookworm. It works on Trixie. Understand what you are accepting: the rail genuinely does sag, and you are choosing to ride through the dips rather than back off — so be scrupulous about clean shutdowns.</p>
+      </div>
+
+      <div class="trap">
+        <h3>scaling_cur_freq reports a frequency you are not getting</h3>
+        <p>While clamped, <code>/sys/…/scaling_cur_freq</code> cheerfully read <strong>1800 MHz</strong> — it reports what the kernel <em>requested</em>, not what the firmware delivered. <code>vcgencmd measure_clock arm</code> read 600 MHz and was correct. Pinning the governor to <code>performance</code> changed nothing.</p>
+        <p>Trust <code>vcgencmd</code>, or better, trust a stopwatch: time a fixed workload at <code>powersave</code> and at <code>performance</code>. If the two are within a few percent, the firmware is ignoring both and something else is in charge.</p>
+      </div>
+
+      <div class="trap">
+        <h3>config.txt silently truncates lines at 98 characters</h3>
+        <p>No warning, no log entry. A long <code>dtoverlay=</code> line simply loses its tail. Ours was 162 characters, so <code>vactive=480</code> arrived as <code>vactive=4</code> and the panel ran at <strong>640×4</strong> — a lit backlight showing essentially nothing. The dropped <code>rgb666-padhi</code> then caused trap three.</p>
+        <p>Split long overlays across <code>dtparam=</code> lines, which bind to the preceding <code>dtoverlay=</code>. Verify what actually landed by reading the live device tree, never by reading config.txt back.</p>
+      </div>
+
+      <div class="trap">
+        <h3>Trixie dropped custom.toml for cloud-init</h3>
+        <p>The Bookworm-era <code>custom.toml</code> is read by nothing on Trixie. First boot runs, resizes the root filesystem, rewrites <code>cmdline.txt</code> — and ignores your provisioning entirely, leaving no user account and no Wi-Fi. The datasource is now NoCloud seeding from <code>/boot/firmware</code>.</p>
+        <p>Confusingly, the <code>ssh</code> marker file <em>still</em> works, because <code>sshswitch</code> is a separate older mechanism. Partial success makes this one hard to read.</p>
+      </div>
+
+      <div class="trap">
+        <h3>DPI and PWM audio both want GPIO 18</h3>
+        <p>The default DPI pinctrl is the contiguous 18-bit group, GPIO 0–21, which includes pin 18. Add <code>audremap,pins_18_19</code> and the two collide — <code>vc4_dpi</code> fails to claim the pin, tears itself down, and <strong>takes all of KMS with it</strong>. You lose the panel, HDMI and HDMI audio at once, which looks nothing like a pin conflict.</p>
+        <p>The <code>rgb666-padhi</code> layout exists precisely to avoid this: it skips 10, 11, 18 and 19, leaving 18/19 free for audio. That is why the vendor chose it.</p>
+      </div>
+
+      <div class="trap">
+        <h3>A kernel update silently orphans the module — and never <code>rmmod</code> it</h3>
+        <p>Modules install under <code>/lib/modules/$(uname -r)/</code>. An <code>apt</code> upgrade that pulls a new kernel (ours went 6.18.34 → 6.18.39 mid-session) leaves the module behind at the old path, so after the next boot there is no controller, no telemetry and <strong>no fan control</strong>, silently. Rebuild against the running kernel, or better, register it with DKMS so upgrades rebuild it for you — which is exactly what the vendor did.</p>
+        <p>Separately: do not <code>rmmod xpi_gamecon</code> on a running device. The XPi microcontroller is what supplies power to the Pi, and the driver talks to it at 125 Hz. Stop that conversation and the board appears to conclude the host is gone — ours powered off mid-command. Install the new <code>.ko</code> and reboot instead.</p>
+      </div>
+
+      <div class="trap">
+        <h3>ALSA sends audio to HDMI by default</h3>
+        <p>The PWM card is enumerated third — <code>card 0: vc4hdmi0</code>, <code>card 1: vc4hdmi1</code>, <code>card 2: Headphones [bcm2835]</code> — and with no <code>asound.conf</code>, ALSA picks card 0. Everything plays silently out the HDMI port while the speaker sits idle. The mixer is unmuted and correct; nothing looks wrong anywhere.</p>
+        <p>Write <code>/etc/asound.conf</code> pointing at the card <em>by name</em>, never by index — plugging or unplugging an HDMI display renumbers the cards and an index-based config breaks without warning.</p>
+      </div>
+
+      <div class="trap">
+        <h3>The volume control's percentage scale is 106 dB wide</h3>
+        <p>Mapping the hardware wheel 1:1 onto <code>amixer</code> percentage feels broken — audible only above roughly 30% of travel. The control spans <strong>−102.39 dB to +4.00 dB</strong> and percentage is linear in dB, so 30% lands at −70 dB. Measured on this hardware:</p>
+<pre><code> 30% -> -70.47dB     60% -> -38.56dB
+ 80% -> -17.28dB    100% -> +4.00dB</code></pre>
+        <p>Map the wheel onto the usable top of the range instead (0 = true mute, 1–100 → ~55–100%). Both the wheel and the driver report correctly throughout; it is only the mapping between them that has to be built.</p>
+      </div>
+
+      <div class="trap">
+        <h3>The first-run wizard renames uid 1000</h3>
+        <p>If provisioning fails and the setup wizard runs, it renames the stock <code>pi</code> account to whatever username you pick and <em>moves its home directory</em>. Anything staged in <code>/home/pi</code> travels with it — which is worth knowing both as a hazard and as a trick: an <code>authorized_keys</code> written to <code>/home/pi</code> before first boot survives into the new user's home and gives you SSH regardless of what the wizard did.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Sequence</div>
+    <h2>The build</h2>
+    <p>Steps are numbered because the order matters — in particular, do not run anything heavy before step&nbsp;6, since nothing controls the fan until then.</p>
+
+    <ol class="steps">
+
+      <li>
+        <h3>Flash Raspberry Pi OS Lite, 64-bit</h3>
+        <p>Lite rather than Desktop: fewer moving parts, and the panel test happens on a plain console. Verify the write by hashing the device, not by trusting <code>dd</code> — its progress figure reports the page cache, and <code>conv=fsync</code> only flushes at the end.</p>
+<pre><code>xz -dc raspios-trixie-arm64-lite.img.xz \
+  | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+
+sudo sh -c 'sync; echo 3 &gt; /proc/sys/vm/drop_caches'   <span class="c"># else you hash RAM</span>
+sudo head -c $(xz -l --robot *.img.xz | awk '/^file/{print $5}') /dev/sdX \
+  | sha256sum</code></pre>
+      </li>
+
+      <li>
+        <h3>Provision first boot with cloud-init</h3>
+        <p>Three files at the root of the boot partition. Without them you get the setup wizard, which needs a keyboard and a working screen — the very thing you are trying to test.</p>
+<pre><code><span class="c"># meta-data — a NEW instance-id forces modules to re-run</span>
+instance-id: piboy64-001
+local-hostname: piboy64
+
+<span class="c"># network-config — netplan v2</span>
+version: 2
+wifis:
+  wlan0:
+    dhcp4: true
+    optional: true
+    access-points:
+      "YOUR_SSID":
+        password: "YOUR_PSK"</code></pre>
+        <p>Belt and braces: also write your public key straight to <code>/home/pi/.ssh/authorized_keys</code> on the root filesystem (mode <code>700</code>/<code>600</code>, owned by uid 1000). It costs nothing and survives the wizard.</p>
+      </li>
+
+      <li>
+        <h3>Enable the DPI panel</h3>
+        <p>Split across short lines — see trap one. Keep HDMI enabled while working; a second display is what lets you debug the first.</p>
+<pre><code>dtoverlay=vc4-kms-dpi-generic
+dtparam=clock-frequency=32000000
+dtparam=hactive=640,hfp=80,hsync=80,hbp=80
+dtparam=vactive=480,vfp=13,vsync=13,vbp=13
+<span class="hl">dtparam=rgb666-padhi</span>
+dtparam=width-mm=71,height-mm=53</code></pre>
+      </li>
+
+      <li>
+        <h3>Restore PWM audio</h3>
+        <p>Without this the amplifier's input floats and the speaker emits a steady high-frequency squeal. Harmless, but unmistakable.</p>
+<pre><code>audio_pwm_mode=2
+dtoverlay=audremap,pins_18_19</code></pre>
+      </li>
+
+      <li>
+        <h3>Restore the clock</h3>
+        <p>One line, and the difference between a 600 MHz handheld and an 1800 MHz one. See trap one for what it actually does and what you are trading away.</p>
+<pre><code>avoid_warnings=2</code></pre>
+        <p>Verify by timing real work rather than reading a clock value:</p>
+<pre><code>vcgencmd get_throttled           <span class="c"># want 0x0</span>
+time dd if=/dev/zero bs=1M count=300 2>/dev/null | sha256sum
+<span class="c"># ~2300 ms free · ~6400 ms clamped</span></code></pre>
+      </li>
+
+      <li>
+        <h3>Build the controller driver</h3>
+        <p>The GPL source lives at <code>/usr/src/xpi_gamecon-1.0</code> on the original card — 556 lines, bit-banging a two-wire protocol to the XPi microcontroller on GPIO 26/27. Three edits make it build on 6.18. The vendor's Makefile also has <code>KVERSION := 'uname -r'</code> in single quotes, which expands to a literal string; use <code>$(shell uname -r)</code>.</p>
+<pre><code>#include &lt;linux/of.h&gt;          <span class="c">// of_device.h no longer pulls this in</span>
+#include &lt;linux/version.h&gt;
+
+#if LINUX_VERSION_CODE &gt;= KERNEL_VERSION(6,16,0)
+#define GC_FROM_TIMER(p,t,m)  timer_container_of(p,t,m)
+#else
+#define GC_FROM_TIMER(p,t,m)  from_timer(p,t,m)
+#endif
+
+#if LINUX_VERSION_CODE &gt;= KERNEL_VERSION(6,15,0)
+#define GC_DEL_TIMER_SYNC(t)  timer_delete_sync(t)
+#else
+#define GC_DEL_TIMER_SYNC(t)  del_timer_sync(t)
+#endif</code></pre>
+        <p>Install it where it survives reboots:</p>
+<pre><code>sudo cp xpi_gamecon.ko /lib/modules/$(uname -r)/extra/
+sudo depmod -a
+echo xpi_gamecon | sudo tee /etc/modules-load.d/xpi_gamecon.conf</code></pre>
+      </li>
+
+      <li>
+        <h3>Replace the fan controller</h3>
+        <p>The vendor's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see the closing section. Until something replaces it the fan is unmanaged, so do this before any sustained load. The daemon below reproduces the vendor's <code>osd.cfg</code> bands and adds a full-speed band above 78 °C that the original lacked.</p>
+<pre><code>duty_for() {   <span class="c"># millidegrees -&gt; 0..255 PWM</span>
+    local t=$1
+    if   [ "$t" -ge 78000 ]; then echo 255   <span class="c"># 100%  (added)</span>
+    elif [ "$t" -ge 75000 ]; then echo 191   <span class="c">#  75%</span>
+    elif [ "$t" -ge 70000 ]; then echo 128   <span class="c">#  50%</span>
+    elif [ "$t" -ge 65000 ]; then echo 102   <span class="c">#  40%</span>
+    elif [ "$t" -ge 60000 ]; then echo  77   <span class="c">#  30%</span>
+    elif [ "$t" -ge 55000 ]; then echo  51   <span class="c">#  20%</span>
+    elif [ "$t" -ge 50000 ]; then echo  26   <span class="c">#  10%</span>
+    else                          echo   0
+    fi
+}</code></pre>
+        <p>Give the fan <strong>downward hysteresis</strong> or it will flap. Measured idle temperature swing on this hardware is ~2400 millidegrees, so anything less than that oscillates across a band edge every sense cycle — writing sysfs and logging each time. 3500 settles it: one transition a minute instead of one every five seconds.</p>
+        <p>Run it from a systemd unit with <code>Restart=always</code> and let the script exit non-zero when the sysfs tree is missing. Do <em>not</em> use <code>ConditionPathExists</code> — a failed condition makes systemd <em>skip</em> the unit, and <code>Restart</code> never applies to something that was never started, so a boot race silently leaves you with no fan control.</p>
+      </li>
+
+      <li>
+        <h3>Report the power switch as KEY_POWER</h3>
+        <p>Do this before you rely on the device at all. Emit the switch as a key event from <code>gc_timer()</code> on the edge, on a device carrying <strong>only</strong> <code>KEY_POWER</code>:</p>
+<pre><code>bool off = !(stat_val &amp; 0x40);
+if (off != last) {
+        last = off;
+        input_report_key(pwr_dev, KEY_POWER, off);
+        input_sync(pwr_dev);
+        if (off) mod_timer(&amp;backstop, jiffies + 8 * HZ);
+}</code></pre>
+        <p>udev tags any <code>KEY_POWER</code> carrier with <code>power-switch</code>, and systemd-logind's <code>HandlePowerKey</code> then runs a full inhibitor-aware shutdown — no policy code of your own. Verify with <code>udevadm info -q all -p /class/input/eventN</code> (the tag lands on the <em>event</em> node, not its parent) and look for logind's "Watching system buttons on …" line.</p>
+        <p>Keep it off the gamepad device: one advertising both joystick axes and <code>KEY_POWER</code> gets enumerated by SDL and shows up as a phantom button in emulators.</p>
+        <p>Add a kernel backstop too, since this is safety-critical and logind can be absent or wedged: arm a timer on the press and call <code>orderly_poweroff(false)</code> if <code>system_state</code> is still <code>SYSTEM_RUNNING</code> when it fires. Re-check the bit inside it, so a switch flipped back on lets it expire harmlessly.</p>
+      </li>
+
+      <li>
+        <h3>Route audio to the speaker</h3>
+        <p>Getting sound out of GPIO 18/19 is not enough — ALSA still has to be told to use that card. Reference it by name so an HDMI display cannot renumber it out from under you.</p>
+<pre><code><span class="c"># /etc/asound.conf</span>
+pcm.!default { type plug; slave.pcm "hw:Headphones,0" }
+ctl.!default { type hw;   card Headphones }</code></pre>
+        <p>RetroArch opens its audio device at launch, so restart any running emulator after changing this.</p>
+      </li>
+
+      <li>
+        <h3>Expose the battery properly</h3>
+        <p>Do not reimplement the vendor's overlay. Register the pack as a standard <code>power_supply</code> device in the driver and EmulationStation, RetroArch and every other tool pick it up natively — no drawing code, no DRM planes. Roughly 80 lines, backed by values the driver already polls.</p>
+        <p>Guard the startup window: <code>percent_val</code> is <code>0</code> until the first XPi packet arrives, and advertising an empty battery — even briefly — invites an emergency shutdown on any system running battery policy. Gate on the driver's <code>lastgood</code> counter and report <code>UNKNOWN</code> until real data exists.</p>
+      </li>
+
+      <li>
+        <h3>Install RetroPie</h3>
+        <p>RetroPie's own detection accepts this platform (<code>platform=rpi4</code>, flags <code>64bit gl vulkan x11</code>, <code>error=none</code>) but sets <code>has_binaries=0</code> — prebuilt packages exist only for Debian 12 and 32-bit Debian 10/11. On Trixie <strong>everything compiles from source</strong>. Budget accordingly: RetroArch plus three cores plus EmulationStation took a few hours on a Pi 4.</p>
+<pre><code>git clone --depth=1 https://github.com/RetroPie/RetroPie-Setup.git
+sudo ./retropie_packages.sh retroarch
+sudo ./retropie_packages.sh lr-nestopia lr-snes9x lr-mgba
+sudo ./retropie_packages.sh emulationstation
+sudo ./retropie_packages.sh runcommand
+sudo ./retropie_packages.sh autostart enable</code></pre>
+        <p>Run it detached under <code>nohup setsid</code> — a multi-hour build should not die with your SSH session. Then set <code>governor = "performance"</code> in <code>runcommand.cfg</code> so games get the full 1800 MHz.</p>
+      </li>
+
+      <li>
+        <h3>Reboot and verify cold</h3>
+        <p>Nothing counts until it survives a power cycle with no monitor attached. Check the module autoloaded, <code>js0</code> exists, the daemon is active, <code>DPI-1</code> reports <code>640x480</code>, and <code>/sys/class/power_supply/xpi-battery</code> exists.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="eyebrow">Sequence</div>
+    <h2>Moving to the real card</h2>
+    <p>The build above happens on a small spare card, which is the right way to do it. But the finished system has to end up on the card the handheld shipped with — and on this hardware that card still holds the only copy of the vendor's image. Everything below is shaped by that: the moment you format the target, the original exists nowhere else.</p>
+
+    <h3>Image the original first, and verify the image</h3>
+    <p>Use <code>partclone</code>, not <code>dd</code>. It walks the filesystem and copies allocated blocks only, so a 939 GB partition holding 35 GB of data yields a 23 GB archive instead of a 939 GB one. Pipe it straight into <code>zstd</code>.</p>
+<pre><code>partclone.ext4 -c -s /dev/mmcblk0p2 -o - | zstd &gt; root.pcl.zstd
+sfdisk --dump /dev/mmcblk0 &gt; partition-table.sfdisk
+sha256sum *.pcl.zstd partition-table.sfdisk &gt; MANIFEST.txt</code></pre>
+    <div class="note warn"><strong>A compressor turns zero input into a valid archive.</strong> If the capture produces nothing, <code>zstd</code> still emits a well-formed 13-byte empty frame and exits <code>0</code> — a success by every check except size. Assert a floor of a megabyte or so, write to <code>.part</code> and rename only on proven success, and check <code>PIPESTATUS</code> for both ends of the pipe rather than the pipeline's exit code. Note also that <code>partclone.dd</code> takes no <code>-c</code> flag; for a FAT boot partition use <code>partclone.vfat</code>, which walks the FAT properly.</div>
+    <p>Verify the checksums before the wipe, not after. This is the last gate in front of a one-way door, and a truncated archive passes a file-size glance and then fails to decompress hours later, long after the source is gone.</p>
+
+    <h3>Replay the captured table — do not invent a layout</h3>
+    <p>The obvious move is to write a fresh partition table sized for the new card. It is also the one that quietly destroys the rollback. A hand-rolled layout with a different start sector made p2 <strong>263 MiB smaller</strong> than the original, and <code>partclone</code> refuses to restore into a smaller target — which would have rendered the 23 GB image unrestorable to the very card it came from, discovered only after that card had been formatted.</p>
+<pre><code>sfdisk /dev/mmcblk0 &lt; partition-table.sfdisk</code></pre>
+    <p>Replaying the dump verbatim also preserves the MBR label-id, so <code>PARTUUID</code>s keep meaning what they meant and a future restore of the vendor image needs no hand-editing.</p>
+    <div class="note warn"><strong><code>findmnt &lt;a&gt; &lt;b&gt;</code> is not "check these two devices."</strong> The two-argument form means <em>source</em> and <em>target</em>, so a guard written that way silently passes while checking something you did not mean. Use <code>--source</code> and <code>--target</code> explicitly. Worth stating plainly because this bug was written twice in one night, in two different scripts, both times inside a safety check.</div>
+
+    <h3>Copy at file level — and measure the link before blaming rsync</h3>
+    <p>A file-level <code>rsync</code> beats a block clone here: only the real data moves, and the target filesystem is already sized for the new card. Two passes, because a FAT boot partition cannot hold ownership or permissions and a single <code>-aHAX</code> run over it produces a flood of errors that buries real ones.</p>
+<pre><code>rsync -aHAX --numeric-ids --info=progress2 \
+  -e "ssh -i KEY" --rsync-path="sudo rsync" \
+  --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' \
+  --exclude='/run/*' --exclude='/tmp/*' --exclude='/swapfile' \
+  --exclude='/var/swap' --exclude='/boot/firmware/*' \
+  pi@HOST:/ /mnt/tgt/
+
+rsync -rlt -e "ssh -i KEY" --rsync-path="sudo rsync" \
+  pi@HOST:/boot/firmware/ /mnt/tgt/boot/firmware/   <span class="c"># no perms on FAT</span></code></pre>
+    <div class="note warn"><strong>Wi-Fi to Wi-Fi through an access point crosses the air twice.</strong> This transfer first ran at <strong>133 kB/s</strong>, projecting a twelve-hour copy of 5.7 GB. The instinct is to blame latency and per-file round-trips — but a measurement showed RTT was a healthy 35 ms, and <code>xfr#15</code> said only fifteen large files had moved, so it was raw bandwidth all along. Both machines were wireless clients, so every packet traversed the radio twice and both ends were weak-signal. Putting one end on ethernet took it to <strong>4.8–7.1 MB/s</strong>, a 36–53× improvement, and dropped RTT to 9.8 ms. Measure throughput and latency separately before choosing a fix; they point at different problems.</div>
+    <p>Expect the copied size to be smaller than the source and do not panic at it. Here <code>df</code> read 6.07 GB on the Pi against 3.94 GB on the card — entirely the deliberately-excluded 2 GB <code>/var/swap</code>.</p>
+
+    <h3>Rewrite the identifiers by mountpoint, not by string substitution</h3>
+    <p><code>rsync</code> copies <code>/etc/fstab</code> and <code>cmdline.txt</code> verbatim, so they still name the build card's <code>PARTUUID</code>s. Left alone the Pi drops to an initramfs prompt: firmware finds the kernel fine, because it reads the FAT partition it booted from by position, and then the kernel goes looking for a root device that is not in this machine.</p>
+    <p>The tempting fix is <code>s/old/new/</code>. Don't — it cannot tell the boot entry from the root entry, so if the two are ever ordered differently it maps them backwards and still reports success. Match on the mountpoint instead:</p>
+<pre><code>P1=$(blkid -s PARTUUID -o value /dev/mmcblk0p1)
+P2=$(blkid -s PARTUUID -o value /dev/mmcblk0p2)
+
+awk -v p1="$P1" -v p2="$P2" '
+  /^[[:space:]]*#/ || NF &lt; 2 { print; next }
+  $2 == "/"              { $1 = "PARTUUID=" p2 }
+  $2 == "/boot/firmware" { $1 = "PARTUUID=" p1 }
+  { print }' /mnt/tgt/etc/fstab
+
+sed -i -E "s#root=PARTUUID=[0-9a-fA-F-]+#root=PARTUUID=${P2}#" \
+  /mnt/tgt/boot/firmware/cmdline.txt</code></pre>
+    <div class="note"><strong>Two checks worth automating here.</strong> <code>cmdline.txt</code> must stay a single line — the firmware reads the first line only, and a stray newline silently discards every parameter after it. And re-run the 98-character audit on <code>config.txt</code> after the copy, since a truncated overlay line is a black screen with no other symptom.</div>
+
+    <h3>Let rsync verify itself</h3>
+    <p>Counting files by hand does not settle whether the copy is complete: an unprivileged scan cannot descend into root-only directories, so the totals never reconcile — 104,564 against 104,542 here, with 21 unreadable directories, which proves nothing in either direction. Re-run the identical transfer with <code>-n --itemize-changes</code> and let rsync answer.</p>
+    <div class="note"><strong>An empty result is the wrong expectation.</strong> The source is a running system; logs, journals and caches move on while you copy. This run reported twelve differences and every one was traceable to the ethernet cable being plugged in mid-copy — a new DHCP lease, a regenerated NetworkManager key, <code>resolv.conf</code> with identical content and a newer mtime. Filter the known-volatile paths and review what is left, rather than chasing zero.</div>
+    <p>One consequence of that regenerated key is worth predicting: <code>/var/lib/NetworkManager/secret_key</code> did not exist at copy time, so NetworkManager rebuilds it on first boot, the DHCP identity changes, and <strong>the machine comes back on a different IP</strong>. Budget for finding it rather than assuming the old address.</p>
+
+    <h3>Restore bulk data locally, never across the network</h3>
+    <p>ROMs are the largest thing on the card and the least suited to a network copy. Put the backup medium in the handheld and copy disk-to-disk: 26 GB over USB is minutes, the same 26 GB over a shared Wi-Fi link is most of a day.</p>
+    <div class="note warn"><strong>Do not extract as root.</strong> EmulationStation runs as the console user; ROMs owned by root are readable but it can never write a gamelist or scrape artwork. Extract as the ordinary user and have the script refuse if invoked under <code>sudo</code> — use <code>sudo</code> only for mounting the backup medium, read-only. Restore ROMs and BIOS only: the vendor's <code>retropie-configs</code> and dotfiles name 32-bit emulator binaries and paths that do not exist in this build, and restoring them wholesale replaces a working configuration with one pointing at nothing.</div>
+    <p>Finally, a system copied this way shares its <code>machine-id</code> with the card it came from. Keep the build card as a rollback — it is a complete working system and a thirty-second recovery — but never let both boot onto the network at once, or they will contest the same DHCP identity.</p>
+
+    <div class="note"><strong>What the finished migration looks like.</strong> <code>/</code> at 938 G on <code>PARTUUID=e22bcd10-02</code>, 2000 MHz under load, <code>throttled=0x0</code> at 1.01 V and 72.5 °C, driver loaded, both daemons active. Confirm the root <code>PARTUUID</code> the kernel actually used — not the one you wrote — since that is the only proof the rewrite took.</div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Afterwards</div>
+    <h2>Putting the library back</h2>
+    <p>Restoring 26 GB of roms is the easy part — plug the backup medium into the handheld and copy disk-to-disk, never across the network. What took longer was discovering that the library itself had been wrong for years, in ways nothing ever reported.</p>
+
+    <h3>EmulationStation matches by extension, and says so only in its log</h3>
+    <p>A system whose directory holds files it does not recognise is not an error — it is silence. The only trace is one line in <code>es_log.txt</code>:</p>
+<pre><code>System "segacd" has no games! Ignoring it.</code></pre>
+    <p>On this device <code>roms/segacd</code> held 98 <code>.md</code> files: Genesis roms, not Sega CD disc images. Sega CD accepts only <code>.iso .cue .chd .m3u</code>, so every one of them was invisible. The same 98 roms also sat in <code>roms/sega32x</code>, which <em>does</em> accept <code>.md</code> — so the collection appeared, mislabelled as 32X — while <code>roms/megadrive</code> was empty. There were no 32X or Sega CD games on the device at all.</p>
+    <div class="note"><strong>Read that log after every library change.</strong> Grep it for <code>has no games</code> and for <code>is not a directory</code>. Both are silent in the UI, and between them they catch misfiled roms, wrong extensions and missing directories — the three ways a library breaks without complaining.</div>
+
+    <h3>Find duplicates by size first, then hash</h3>
+    <p>Two files of different sizes cannot be identical, so hashing an entire 26 GB library to find duplicates reads about twelve times more than necessary. Inventory sizes, keep only the sizes that occur more than once, and hash that subset — here 2,168 files out of 6,671, which found 212 distinct files existing in more than one copy and 3.2 GB of redundancy.</p>
+<pre><code>find "$R" -type f -printf '%s\t%p\n' | sort -n &gt; inventory
+awk -F'\t' 'NR==FNR{c[$1]++;next} c[$1]&gt;1' inventory inventory | cut -f2-</code></pre>
+
+    <div class="note warn"><strong>Identical bytes do not always mean redundant files.</strong> Of 212 duplicate groups, 34 were not roms at all. MAME keeps a <em>per-game</em> <code>.cfg</code>, and two games that have never been reconfigured hold byte-identical defaults — deleting <code>ARKNOIDU.CFG</code> because it matches <code>ARKANOID.CFG</code> silently destroys that game's configuration the moment someone changes it. Aleph One likewise ships each scenario its own <code>Readme.md</code>. Exclude support files and game data from any dedupe; restrict it to rom extensions.</div>
+
+    <p>Which copy survives matters too. Prefer the one outside an <code>Alternate Roms</code> folder, then — for N64 — prefer <code>.z64</code> over <code>.n64</code> or <code>.v64</code>. When two such files are byte-identical the extension is only a label, and <code>.z64</code> is the one every tool expects.</p>
+
+    <h3>Empty rom directories are load-bearing</h3>
+    <p>Deleting the empty system folders looks like obvious tidying. It is not: <code>es_systems.cfg</code> lists a system for every installed emulator, and several cores cover systems you may have no roms for — <code>lr-genesis-plus-gx</code> alone brings Master System and Game Gear. Remove the folders and every start logs <code>Error - folder with path … is not a directory!</code>, and adding a rom later has nowhere to go. Recreate any directory the config references:</p>
+<pre><code>grep -oE '&lt;path&gt;[^&lt;]+&lt;/path&gt;' /etc/emulationstation/es_systems.cfg \
+  | sed 's|&lt;/*path&gt;||g' | while read -r p; do [ -d "$p" ] || mkdir -p "$p"; done</code></pre>
+
+    <div class="note"><strong>Leave curated filenames alone.</strong> Names like <code>01. Sonic The Hedgehog 2 (World) (Rev A).md</code> look like clutter until you count them: 104 of 104 on SNES, 83 of 83 on Game Boy. That consistency is a hand-built play order, and stripping the prefixes to match No-Intro convention destroys information that cannot be recovered from the files themselves.</div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Afterwards</div>
+    <h2>Adding a second controller</h2>
+    <p>A Logitech F310 in XInput mode needs no driver work — <code>xpad</code> claims it on plug-in and it appears as <code>js1</code> beside the PiBoy's own pad. What it needs is two configuration files, and one of them is keyed on a value you cannot see.</p>
+
+    <h3>Read the capability bitmaps instead of assuming a layout</h3>
+    <p><code>/proc/bus/input/devices</code> reports exactly what the pad exposes, which fixes the SDL indices without pressing a single button. <code>KEY=7cdb000000000000 0 0 0 0</code> sets bits 48–62 of the word covering codes 256–319, i.e. codes 304, 305, 307, 308, 310, 311, 314, 315, 316, 317, 318 — the eleven standard buttons, in that order, so SDL numbers them 0–10. <code>ABS=3003f</code> gives axes 0–5 plus 16/17, meaning two sticks, two <em>analog</em> triggers and a real hat.</p>
+    <div class="note"><strong>The triggers are axes, not buttons</strong> (<code>ABS_Z</code>/<code>ABS_RZ</code>), and the d-pad is a hat, not axes 6/7. Map them as <code>input_l2_axis = "+2"</code> and <code>input_up_btn = "h0up"</code>; treating either as an ordinary button leaves it working only at full travel, or not at all.</div>
+    <p>One more convention catches people: RetroPad is laid out SNES-style, so the pad's physical <strong>A</strong> (bottom) is RetroPad <strong>B</strong>, and physical <strong>B</strong> (right) is RetroPad <strong>A</strong>. Getting this backwards is the classic "my confirm button is wrong" complaint.</p>
+
+    <h3>Derive the SDL GUID — and verify the derivation before trusting it</h3>
+    <p>RetroArch matches a joypad profile by name, but EmulationStation matches by SDL GUID, so an <code>es_input.cfg</code> entry with a wrong GUID is simply ignored. The GUID is not random; it is eight little-endian 16-bit fields:</p>
+<pre><code>bus | crc16(name) | vendor | 0000 | product | 0000 | version | 0000</code></pre>
+    <p>The name field is a CRC-16/ARC (reflected, polynomial <code>0xA001</code>, init 0) over the device name. Everything else comes straight from <code>/sys/class/input/inputN/id/</code>.</p>
+    <div class="note"><strong>Check the formula against a pad that already works before applying it to one that does not.</strong> The PiBoy's stored GUID is <code>15001176010000000100000000010000</code>; computing <code>CRC-16/ARC("PiBoy DMG Controller")</code> gives <code>0x7611</code>, matching bytes 2–3 exactly, and its bus/vendor/product/version line up with sysfs. Only once that reproduced a known-good value was it worth generating <code>030005ff6d0400001dc2000014400000</code> for the F310 — which EmulationStation then accepted, logging <code>Added known joystick 'Logitech Gamepad F310'</code>. Without that check the honest move is the built-in input wizard.</div>
+    <p>Note that running that wizard also regenerates the RetroArch profile from the ES configuration, overwriting a hand-written one. That is usually what you want; just do not be surprised by it.</p>
+  </section>
+
+
+  <section>
+    <div class="eyebrow">Measured</div>
+    <h2>The charger, and what &minus;250 mA actually meant</h2>
+    <p>The battery reported <code>Discharging</code> at 100% with the charger plugged in, and <code>amps</code> never once read positive. That looks like a dead charge path. Chasing it produced three wrong theories before the measurement that settled it, and the sequence is worth recording because each wrong turn was individually reasonable.</p>
+
+    <h3>The reading is real — prove that first</h3>
+    <p>The decode is one line, and it is signed:</p>
+<pre><code>cur_val = (int)((signed char)data[8]) * 50;   <span class="c">// 50 mA per LSB</span></code></pre>
+    <p>Load-testing it is the cheapest possible discriminator between a real sensor, a stuck value and a fixed sign. Four cores at 2000 MHz moved it from <code>-250</code> to <code>-350</code> and back — responsive, therefore real. But 100 mA is far too small a delta for a load that should add 800&ndash;900 mA, which is what launched the wrong theory: that the <code>*50</code> scale factor was off by roughly 8&times;.</p>
+
+    <div class="note warn"><strong>The decisive test is removing the charger, not adding load.</strong> Unplugged, the same reading went to <code>-1650</code> mA and the pack voltage began falling — 6.7 W at 4.05 V, exactly right for an overclocked Pi 4 with a panel and fan. The scale was never wrong. Plugged in, the charger simply carries nearly all of the load and the pack contributes a trickle near the noise floor. At 50 mA per LSB, &minus;250 mA is <em>five counts</em> from zero, and building a theory on it was over-reading the instrument.</div>
+
+    <h3>A voltage-derived gauge sags under load — that is not discharge</h3>
+    <p>On battery the pack read 4045 mV and "89%". Reconnecting the charger snapped it back to 4200 mV and "100%" within seconds. Nothing charges 11% in five seconds: the gauge is derived from terminal voltage, and terminal voltage sags under a 1.65 A draw and rebounds the moment the load moves to the charger. The pack was near-full throughout. Expect any voltage-derived capacity figure on a handheld to read low while playing and jump when plugged in.</p>
+
+    <h3>So why is the current always negative?</h3>
+    <p>Because the pack has been full the entire time. A full pack on a terminated charger sits at zero, and zero on this sensor dithers between <code>0</code> and <code>-50</code>. Positive current would require a genuinely depleted pack, which two minutes of unplugged testing never produced — it only produced sag.</p>
+
+    <h3>Three driver fixes fell out of it</h3>
+    <p>The investigation exposed real defects in the <code>power_supply</code> implementation, all of them mine:</p>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Defect</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td>Status inferred from the <em>sign of the current</em>, so a full pack on a charger oscillated <code>Full</code>/<code>Discharging</code> six times in 100 seconds on one LSB of dither</td><td>Derive from the VBus bit (<code>0x80</code>) the hardware was reporting all along and nothing ever read</td></tr>
+          <tr><td>Every oscillation fired <code>power_supply_changed()</code> — a netlink broadcast and udev wakeup</td><td>Deadband &plusmn;50 mA (one LSB) as zero, and include VBus in the change test</td></tr>
+          <tr><td>Only a battery supply was registered, so nothing on the system could tell wall power from battery</td><td>Register a second supply of type <code>USB</code> exposing <code>online</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+<pre><code><span class="c">/* Derive from VBus first. Inferring direction from the sign of the current
+ * alone made a full pack on a charger oscillate between Full and Discharging
+ * on a single LSB of dither. */</span>
+if (!valid)                            val-&gt;intval = POWER_SUPPLY_STATUS_UNKNOWN;
+else if (!(stat_val &amp; XPI_STAT_VBUS))  val-&gt;intval = POWER_SUPPLY_STATUS_DISCHARGING;
+else if (pct &gt;= 100)                   val-&gt;intval = POWER_SUPPLY_STATUS_FULL;
+else if (cur &lt; -XPI_CUR_DEADBAND)      val-&gt;intval = POWER_SUPPLY_STATUS_DISCHARGING;
+else                                   val-&gt;intval = POWER_SUPPLY_STATUS_CHARGING;</code></pre>
+    <p>The net-draining case is kept deliberately: plugged in and still losing charge past the deadband is a genuine condition — the supply cannot keep up — and worth surfacing rather than hiding behind "it is plugged in, therefore charging". Measured afterwards: steady <code>Full</code>, and <strong>zero</strong> power_supply uevents in ten seconds where the old build emitted one per flap.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Input</div>
+    <h2>The parts that fail silently</h2>
+    <p>Every input problem found on this build shared a shape: nothing logged, nothing errored, the control simply did nothing. Collected here because the symptom gives no clue which layer is at fault.</p>
+
+    <h3>The launch menu ignores the gamepad — joy2key was never installed</h3>
+    <p>RetroPie's runcommand menu is a <code>dialog</code> box that reads only the keyboard. A helper called joy2key bridges the pad to it, and <code>runcommand.sh</code> gives up without a word when it is missing:</p>
+<pre><code>function start_joy2key() {
+    [[ "$DISABLE_JOYSTICK" -eq 1 || ! -f "$JOY2KEY" ]] &amp;&amp; return
+</code></pre>
+    <p>A source-built RetroPie installs emulator cores but not this, so the d-pad and buttons do nothing in the one menu you cannot avoid. <code>sudo ./retropie_packages.sh joy2key</code> fixes it. Note the default mapping sends Space on button 1 and Esc on button 2, so on a Game Boy-style face <em>X</em> cancels rather than <em>B</em>; swapping those two codes is a one-line change to the wrapper.</p>
+
+    <h3>Console emulators have no way out, and the only exit is a power cycle</h3>
+    <p>RetroArch exits on Start+Select. Emulators launched with the <code>CON:</code> prefix — <code>frotz</code> and anything else console-based — never see a RetroArch hotkey, so on a device with no keyboard attached the only remaining exit is cutting power. On hardware where every unclean shutdown risks the filesystem, that is the one exit path worth engineering away.</p>
+    <div class="note warn"><strong>A universal escape hatch collides with normal play unless it is held.</strong> The obvious implementation — watch for both buttons, kill the emulator — is wrong, because most <em>ports</em> run standalone rather than under RetroArch, and in Duke Nukem or Quake III Start is an ordinary menu button. An instant trigger kills the game mid-play. Requiring a two-second hold cannot collide with in-game use. Guard it further so it fires only while <code>runcommand.sh</code> is running (never on the ES menu) and only when RetroArch is absent (which keeps its own hotkey). Watch evdev codes rather than joystick indices and it works for every pad without per-device configuration.</div>
+
+    <h3>The last core installed claims the default</h3>
+    <p>Installing <code>lr-fbneo</code> for arcade silently made it the default for <em>NES</em> as well, because it registers an <code>nes</code> subsystem. Every NES game then failed with <code>Romset is Unknown</code> — FBNeo matches by romset name and a file called <code>01. Super Mario Bros. 3 (USA).nes</code> matches nothing. Three other systems had no default at all. Audit after any batch install:</p>
+<pre><code>for s in /opt/retropie/configs/*/; do
+  grep -H '^default' "$s/emulators.cfg" 2&gt;/dev/null
+done</code></pre>
+
+    <h3>ioquake3 ships with the joystick switched off</h3>
+    <p>Two separate faults, and fixing only the first leaves the pad still broken. <code>seta in_joystick "0"</code> is the shipping default, so nothing registers. Enable it and the look axes are still wrong: ioquake3 defaults yaw/pitch to axes 2 and 3, but on an XInput pad <strong>axis 2 is the left trigger</strong>. The right stick is axes 3 and 4.</p>
+    <div class="note"><strong>Put it in <code>autoexec.cfg</code>, not <code>q3config.cfg</code>.</strong> Quake III rewrites <code>q3config.cfg</code> on every quit, silently reverting your edits. <code>autoexec.cfg</code> runs afterwards and is never touched. Modern engines — eduke32, Aleph One — use the <code>SDL_GameController</code> API instead and auto-map any recognised pad with no configuration at all; ioquake3 predates that abstraction.</div>
+    <p>One pad at a time, incidentally: <code>in_joystickNo</code> selects a single device, and single-player engines open controller index 0. On a handheld with one stick, bind the stick to <em>look</em> and the d-pad to <em>movement</em> — digital strafing is merely old-fashioned, digital aiming is unplayable. Point unused axis cvars at axes that exist and zero their scale, or the engine logs <code>bad axis</code> continuously.</p>
+
+    <h3>Remap per core, never globally</h3>
+    <p>N64 needed its face buttons swapped and nothing else did. A per-core remap in the system's <code>input_remapping_directory</code> touches exactly one emulator:</p>
+<pre><code><span class="c"># /opt/retropie/configs/n64/Mupen64Plus-Next/Mupen64Plus-Next.rmp
+# RetroPad ids: 0=B 1=Y 2=Select 3=Start 4..7=dpad 8=A 9=X 10=L 11=R</span>
+input_player1_btn_a = "0"
+input_player1_btn_b = "8"</code></pre>
+    <p>The filename must match the core's internal <code>corename</code> (<code>Mupen64Plus-Next</code>), not the RetroPie module name (<code>lr-mupen64plus-next</code>). Note also that RetroArch overwrites this file if you save a remap from the in-game menu.</p>
+    <div class="note"><strong>Not every odd mapping is a bug.</strong> Genesis Plus GX maps Genesis A/B/C onto RetroPad Y/B/A by documented default. It looks wrong on a diamond face and is not — the Genesis pad has three buttons in a row and a four-button diamond cannot reproduce that. Remapping it to "fix" the appearance makes the device disagree with every guide written for it.</div>
+  </section>
+  <section>
+    <div class="eyebrow">Reference</div>
+    <h2>Translating the vendor's display config</h2>
+    <p>The original ran legacy fkms, where timings were a firmware-parsed string. Under full KMS the same numbers become device-tree properties. This mapping is the core of the port.</p>
+
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>fkms field</th><th class="num">Value</th><th>KMS parameter</th></tr></thead>
+        <tbody>
+          <tr><td>h_active</td><td class="num">640</td><td><code>hactive=640</code></td></tr>
+          <tr><td>h_front_porch</td><td class="num">80</td><td><code>hfp=80</code></td></tr>
+          <tr><td>h_sync_pulse</td><td class="num">80</td><td><code>hsync=80</code></td></tr>
+          <tr><td>h_back_porch</td><td class="num">80</td><td><code>hbp=80</code></td></tr>
+          <tr><td>v_active</td><td class="num">480</td><td><code>vactive=480</code></td></tr>
+          <tr><td>v_front / sync / back</td><td class="num">13 / 13 / 13</td><td><code>vfp=13,vsync=13,vbp=13</code></td></tr>
+          <tr><td>pixel_freq</td><td class="num">32000000</td><td><code>clock-frequency=32000000</code></td></tr>
+          <tr><td><code>dpi_output_format</code></td><td class="num">0x070016</td><td><code>rgb666-padhi</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The output format decodes by nibble: low nibble <code>6</code> is 18-bit RGB666 CFG2, the next nibble <code>1</code> is RGB ordering. CFG2 <em>is</em> the pad-high pin layout, which is why the vendor also carried <code>gpio=0-9,12-17,20-25=a2</code>. Under KMS the overlay handles that muxing itself. Confirm the result in the live tree — <code>bus-format</code> should read <code>0x1015</code>, not the default <code>0x1009</code>:</p>
+
+<pre><code>od -An -tx4 --endian=big /proc/device-tree/panel/*bus*format*
+cat /sys/class/drm/card0-DPI-1/modes</code></pre>
+
+    <h3>Pin budget</h3>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>GPIO</th><th>Owner</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td class="num"><code>0–9, 12–17, 20–25</code></td><td>DPI panel</td><td>pad-high layout</td></tr>
+          <tr><td class="num"><code>18, 19</code></td><td>PWM audio</td><td>free only because of pad-high</td></tr>
+          <tr><td class="num"><code>26, 27</code></td><td>XPi controller</td><td>clock / data, bit-banged</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The controller sits outside the DPI range entirely, so enabling the panel never disturbs it.</p>
+  </section>
+
+  <section>
+    <h2>What the driver exposes</h2>
+    <p>Once loaded, <code>/sys/kernel/xpi_gamecon/</code> carries the board's telemetry and controls. All nodes are <code>0660 root:root</code>. Live, changing values here are also the quickest proof the GPIO protocol is talking.</p>
+
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Node</th><th>Reads</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>battery</code></td><td class="num">4115</td><td>millivolts, single-cell Li-ion</td></tr>
+          <tr><td><code>percent</code></td><td class="num">95</td><td>state of charge</td></tr>
+          <tr><td><code>amps</code></td><td class="num">−200</td><td>positive charging, negative discharging</td></tr>
+          <tr><td><code>fan</code></td><td class="num">0–255</td><td>PWM duty — <strong>not</strong> a percentage</td></tr>
+          <tr><td><code>red</code>, <code>green</code></td><td class="num">0–255</td><td>front LED brightness</td></tr>
+          <tr><td><code>volume</code></td><td class="num">100</td><td>wheel position</td></tr>
+          <tr><td><code>version</code></td><td class="num">261</td><td>XPi firmware</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">The <code>fan</code> scale catches people out. The vendor's <code>osd.cfg</code> lists its bands as percentages, so a configured 20 % appears here as <code>51</code>. Anything that treats the node as 0–100 will run the fan at roughly 40 % of what you asked for.</div>
+  </section>
+
+  <section>
+    <h2>Three things that were not bugs</h2>
+    <p>Worth recording, because each looks like an obvious defect and none needs fixing.</p>
+    <p>The driver derives the peripheral base by reading the <code>/soc</code> <code>ranges</code> property by <code>u32</code> index — which ought to break under a 64-bit kernel's two-cell parent addresses. It doesn't. The author wrote a fallback that reads index 1, sees the high word <code>0x00000000</code>, and drops to index 2 for <code>0xfe000000</code>. It resolves correctly on both architectures.</p>
+    <p>Similarly, the panel needed no sync-polarity inversion. The vendor's timings carried <code>h_sync_polarity=1</code> and <code>v_sync_polarity=1</code>, which map onto the overlay's defaults; adding <code>hsync-invert</code>/<code>vsync-invert</code> would have broken a working display.</p>
+
+    <h3>The red LED ignores you, and should</h3>
+    <p>Writes to <code>green</code> work and are true PWM brightness — <code>15</code> is visibly dimmer than <code>100</code>, so pulsing and breathing patterns are available. Writes to <code>red</code> do nothing at any value, alone or combined, even though the element clearly lights on its own. That reads as a broken output. It is not.</p>
+    <p>The driver <em>does</em> transmit the value. The outbound protocol round-robins four settings, one per packet, selected by a high byte:</p>
+<pre><code>data[GC_LENGTH+0] = 0xC0 | (index &amp; 0x3);      <span class="c">// 0xC2 = red, 0xC3 = green</span>
+data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan, red, green</span></code></pre>
+    <p>Red goes out as selector <code>0xC2</code> every fourth packet and the XPi discards it, because that channel is firmware-owned. The vendor documents a single <strong>bi-colour</strong> LED whose red element is a battery gauge: green at 25% or above, then yellow, then a second yellow, then red as the pack drains. It also lights with no battery fitted, and flashes a green-then-red diagnostic when the Pi is not communicating at all — behaviour that cannot involve software running on the Pi.</p>
+    <div class="note"><strong>Green is yours; red is the firmware's.</strong> Register green as a <code>leds</code> classdev and let the kernel animate it. Expose red read-only — a writable node that silently does nothing is worse than no node, and this one consumed two separate investigations. Note also that low-battery indication in a userland daemon duplicates what the firmware already signals on the same LED.</div>
+    <div class="note warn"><strong>A caution on method.</strong> Brief four-to-five second sweeps produced results that contradicted each other and sent us chasing a non-existent brightness-scale bug. Hold each state until it is confirmed by eye. Better still, check whether the vendor documented the behaviour before measuring at all — the answer here sat in a public troubleshooting page the whole time.</div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Open</div>
+    <h2>What is not solved</h2>
+
+    <h3>Replacing the vendor's OSD — mostly a solved problem</h3>
+    <p>The <code>osd</code> binary is a 32-bit armhf ELF linking <code>/opt/vc/lib/libbcm_host.so</code>, <code>libvchiq_arm.so</code> and <code>libvcos.so</code> — the legacy Broadcom VideoCore userland. That stack does not exist on 64-bit Raspberry Pi OS, dispmanx does not work under full KMS anyway, and multiarch cannot save it because those libraries were never ported. It will not run again.</p>
+    <p>But it turns out it was doing four jobs, and only one of them was graphics:</p>
+
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>OSD job</th><th>Replacement</th></tr></thead>
+        <tbody>
+          <tr><td>Fan curve</td><td><code>hwmon</code> <code>pwm1</code>, driven by <code>piboy-fand</code></td></tr>
+          <tr><td>Status LED</td><td><code>leds</code> class — the <em>kernel</em> animates it</td></tr>
+          <tr><td>Volume wheel</td><td><code>piboy-vold</code>, blocking on the <code>ABS_VOLUME</code> device</td></tr>
+          <tr><td>Battery reporting</td><td><code>power_supply</code> class — <em>better</em> than the original</td></tr>
+          <tr><td>Clean shutdown on switch</td><td><code>piboy-fand</code> watching status bit <code>0x40</code></td></tr>
+          <tr><td>Volume &amp; battery messages on screen</td><td>RetroArch <code>SHOW_MSG</code> over UDP</td></tr>
+          <tr><td>Always-visible icon strip</td><td>not reimplemented — see below</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Exposing the battery through the kernel's standard interface is a genuine improvement on what the vendor shipped: instead of a proprietary sysfs tree only their binary understood, every tool on the system can read it.</p>
+
+    <h3>Drawing over a running game without dispmanx</h3>
+    <p>The obstacle is not drawing, it is <strong>DRM master exclusivity</strong>. The DPI CRTC has plenty of free overlay planes (<code>plane-1</code> is the primary; <code>plane-0</code>, <code>plane-2…9</code> sit unused), but only one process may hold DRM master on a CRTC, and EmulationStation and RetroArch each take it via SDL's KMSDRM backend. An independent overlay daemon cannot commit to those planes while a game owns the display. dispmanx let the vendor sidestep exactly this.</p>
+    <p>The cheap way through is to ask the app that <em>does</em> own the display to draw for you. RetroArch ships a UDP command interface:</p>
+<pre><code><span class="c"># retroarch.cfg</span>
+network_cmd_enable = "true"
+network_cmd_port   = "55355"
+
+<span class="c"># push a message onto the running game — no netcat needed</span>
+exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 45%" &gt;&amp;3</code></pre>
+    <p><code>piboy-fand</code> fires this whenever the wheel moves, and again when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than the vendor's static meter, which you had to look at.</p>
+    <p>For the menu itself, <code>menu_battery_level_enable</code> shows charge in RGUI's top-right — but only alongside <code>menu_timedate_enable</code>, since in RGUI they share one status line. And note RetroPie's EmulationStation has <em>no</em> status display of any kind: no clock, no battery, nothing in the binary to enable.</p>
+
+    <h3>What a real status bar would take</h3>
+    <p>A permanent strip over both the frontend and games means running a Wayland compositor (<code>labwc</code>, <code>cage</code>) as DRM master, with ES and RetroArch as clients and a layer-shell bar (<code>waybar</code>, <code>yambar</code>) above them. That is the honest modern equivalent of dispmanx. The blocker is that RetroPie builds RetroArch <strong>without</strong> Wayland:</p>
+<pre><code>retroarch --features
+  Wayland  - Wayland input/video drivers: no
+  KMS      - Video context driver: yes</code></pre>
+    <p>So it is a compositor install, a full RetroArch rebuild from source with Wayland enabled, reworked input routing, and a compositing cost on a 640×480 panel where a 20 px bar is 4% of the screen. Treat it as its own project, with a working image backed up first.</p>
+    <p><strong>Back up the binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
+
+    <h3>Measured: leave the bit-bang clock alone</h3>
+    <p>The driver busy-spins in <code>udelay()</code> to clock its 2-wire protocol, and the half-period is a compile-time constant. Arithmetic suggests it costs a fifth of a core permanently, which makes lowering it look like the biggest available win. Make it a writable module parameter, add <em>cumulative</em> CRC counters (the vendor's <code>lastgood</code>/<code>lasterror</code> are consecutive-run counters and cannot express a rate), and sweep it:</p>
+<pre><code>BITRATE  GOOD/s  CRC/s  ERR_RATE
+7        77      0      0.000%    <span class="c">vendor default</span>
+6        77      0      0.000%
+5        76      0      0.000%    <span class="c">fastest error-free</span>
+4        77      0      0.129%    <span class="c">errors begin</span>
+3        76      0      0.774%
+2         0     78      100.00%   <span class="c">protocol collapses</span></code></pre>
+    <p>So the vendor's 7 has about two steps of margin and was not arbitrary. But no measurement supported changing it, and three separate attempts failed for three different reasons worth knowing:</p>
+    <ul class="plain">
+      <li><strong>softirq accounting reads zero</strong> — the kernel does not attribute <code>udelay()</code> busy-wait in a timer callback to softirq time.</li>
+      <li><strong>A throughput benchmark shows nothing</strong>, even at bitrate 20 (nearly 3× the spin). The timer spins on one core while a single-threaded workload runs on another of four.</li>
+      <li><strong>Discharge current cannot resolve it</strong> — the XPi decodes current as <code>(signed char) * 50</code>, so the sensor is quantised to 50 mA. Every <code>amps</code> reading being a round multiple of 50 is this, not coincidence.</li>
+    </ul>
+    <p>The cost may well be real and simply invisible to every instrument on the device. Trading two steps of protocol margin — on the link carrying controls, battery telemetry <em>and</em> the power switch — for an unmeasurable saving is a bad bargain. A bench supply with a current meter on the rail would settle it in minutes; until then, leave it at 7.</p>
+
+    <h3>Register with the kernel's subsystems, not a private sysfs tree</h3>
+    <p>The vendor exposed everything through one bespoke kobject — <code>/sys/kernel/xpi_gamecon/{fan,green,volume,battery,…}</code> — which only their binary understood. Four small registrations put the same hardware behind interfaces the rest of Linux already speaks, and each one deletes userspace code rather than adding it.</p>
+
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Registration</th><th>Appears as</th><th>What it removes</th></tr></thead>
+        <tbody>
+          <tr><td><code>led_classdev_register()</code></td><td><code>/sys/class/leds/piboy:green:status</code></td><td>All LED animation. Kernel triggers blink and fade</td></tr>
+          <tr><td><code>hwmon_device_register_with_groups()</code></td><td><code>/sys/class/hwmon/hwmonN/pwm1</code></td><td>Fan visible to <code>sensors</code>, <code>fancontrol</code>, anything generic</td></tr>
+          <tr><td><code>input_register_device()</code> + <code>ABS_VOLUME</code></td><td>"PiBoy DMG Volume Wheel"</td><td>The hand-rolled jitter deadband — <code>fuzz</code> does it in-kernel</td></tr>
+          <tr><td><code>power_supply_register()</code></td><td><code>/sys/class/power_supply/xpi-battery</code></td><td>Any need to draw a battery meter at all</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The compounding effect is the part worth noticing: registering the battery <strong>auto-creates LED triggers</strong>. With both a <code>leds</code> class device and a <code>power_supply</code> present, the kernel offers <code>xpi-battery-charging</code>, <code>xpi-battery-full</code> and <code>xpi-battery-charging-blink-full-solid</code> among its 38 triggers. The "gentle charging breathe" that started life as a bash array indexed off a tick counter is now one <code>echo</code> of a trigger name, animated by the kernel.</p>
+    <p>Use a <em>separate</em> input device for the wheel rather than another axis on the gamepad — an extra axis would show up to SDL as a game control and confuse emulator input mapping.</p>
+
+    <div class="note"><strong>A fan watchdog beats a cooling device here.</strong> Binding a <code>thermal_cooling_device</code> to trip points is the textbook answer, but it needs an OF node — and this module is a bare <code>module_init</code> that <code>ioremap</code>s a hand-probed peripheral base, so it would first have to become a platform driver. The non-OF binding path was reworked and de-exported around 6.8, so it will not span 5.10–6.18 either. Far cheaper: have the driver hold a safe floor whenever nobody has written <code>pwm1</code> for ~30 s. That covers the boot gap, the crash gap and the <code>systemctl stop</code> gap in about fifteen lines, and belongs with <code>pwm1_enable</code> so the semantics are standard hwmon rather than invented.</div>
+
+    <div class="note warn"><strong>Then make the governor feed it.</strong> A daemon that writes <code>pwm1</code> only when the duty <em>changes</em> will be overridden by that watchdog the moment the temperature is stable for 30 s — the fan silently jumps to the floor and stays there. Write every cycle; the sysfs write is a shell builtin and costs nothing. Both halves are correct alone and wrong together, and a single sample taken within 30 s of a write looks perfect.</div>
+
+    <div class="note"><strong>Publishing order matters.</strong> If a "do we have valid data yet" flag is latched before the values it guards are stored, a reader on another core can observe the flag set while the data is still zero — reporting a battery that is present at 0%, which is exactly what such a guard exists to prevent. Store the values, <code>smp_wmb()</code>, then publish the flag with <code>WRITE_ONCE()</code>; pair it with <code>READ_ONCE()</code> and <code>smp_rmb()</code> in the property getter. The Pi 4 is SMP and the getter runs from a userspace read on another core.</div>
+
+    <h3>Consume the input device, or do not create it</h3>
+    <p>Registering <code>ABS_VOLUME</code> and then still polling the private sysfs node is the worst of both: the kernel's <code>fuzz</code> filter never applies to that reader, so the deadband ends up implemented twice in two languages that can drift. Move volume to a small evdev consumer that blocks on the fd — no polling, no per-change <code>amixer</code> fork, and it is the only thing that lets the rest of the daemon collapse to a plain multi-second loop.</p>
+    <p>Bash cannot do this (input events are binary <code>struct input_event</code> records), so it is a short C program. Two things bite there:</p>
+    <ul class="plain">
+      <li><strong>glibc's <code>signal()</code> sets <code>SA_RESTART</code></strong>, so a blocking <code>read()</code> restarts after the handler and the process ignores SIGTERM entirely — it dies only to SIGKILL. Use <code>sigaction()</code> with <code>sa_flags = 0</code>.</li>
+      <li><strong>The dB API can set mute instead of a level.</strong> This control reports its dB <em>minimum</em> as the mute sentinel, so interpolating from it lands below the audible floor. Use the raw volume range, which is already linear in dB on this card and therefore already perceptually linear.</li>
+    </ul>
+    <div class="note warn"><strong>Mute above zero, not at it.</strong> <code>input_defuzz_abs_event()</code> drops changes smaller than <code>fuzz/2</code>, so with any useful fuzz the final wheel 1 → 0 step never reaches userspace: volume rests at the floor and stays quietly audible forever. Treat anything at or below a small threshold as mute, and toggle the element's <code>pswitch</code> as well — minimum volume is not necessarily silence.</div>
+
+    <h3>Two unexplained shutdowns — with a strong candidate</h3>
+    <p>The unit powered itself off twice in one session: full battery, ~55 °C, no thermal or under-voltage flags, and the second with a known-good module during nothing more taxing than a <code>systemd-journald</code> restart.</p>
+    <p>The likeliest explanation only emerged later, from the power-switch work above: <strong>a shutdown request nobody answers looks exactly like a spontaneous power-off.</strong> The XPi asserts the bit, waits ~31 seconds, and drops the rail — no flags, no warning, nothing in a volatile journal. A switch that is marginal, or simply nudged, produces precisely the observed signature. Not proven for those two events, but it is a real mechanism that was demonstrably live on this hardware for the whole session.</p>
+    <p>Neither event left evidence, because journald was volatile the entire time — including through several attempts to enable persistence that silently did nothing (see the traps). Fix that first; it is the difference between diagnosing the next one and guessing again.</p>
+    <p>Note also that an unexpected power-off can leave <code>dpkg</code> mid-transaction, after which every package operation fails until <code>sudo dpkg --configure -a</code> is run. Two RetroPie packages failed at their dependency step for exactly this reason, which reads as a build error and is not one.</p>
+
+    <h3>Positive charge current has never been observed</h3>
+    <p>Everything about the charge path checks out — VBus detection flips cleanly on unplug, the current reading tracks load and source correctly, and the pack demonstrably holds charge. But <code>amps</code> has never once read above zero, because the pack has been full or near-full every time it was measured. Two minutes on battery produces voltage sag, not depletion. Settling it needs a genuine 20&ndash;30 minute discharge followed by a plug-in, and until then it is unproven whether the sensor reports charge current at all or only discharge.</p>
+
+    <h3>NeoGeo is blocked by content, not by software</h3>
+    <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The restored vendor backup did not contain one either, which means NeoGeo never worked on the original machine. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
+
+    <h3>Soft reboot does not come back</h3>
+    <p><code>systemctl reboot</code> takes the unit down and it stays down — the XPi appears to cut power on halt without re-asserting it, so the physical switch has to be flipped. Worth knowing before you issue a remote reboot on a device sitting in another room, and worth designing around if you script anything.</p>
+
+    <div class="note warn"><strong>The rail really is low.</strong> <code>avoid_warnings=2</code> restores full speed by suppressing the firmware's <em>reaction</em>, not by fixing the voltage — the XPi's boost output still dips below what the Pi expects. The vendor shipped it this way for years, so it is evidently survivable, but you are running the SoC through those dips. Treat clean shutdowns as mandatory and keep backups current.</div>
+  </section>
+
+  <footer>
+    <div class="tones" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <p>Worked out against a PiBoy DMG with a Pi 4B rev 1.4, Raspberry Pi OS Trixie (2026-06-18, arm64 Lite), kernel 6.18.34. The build was done on a separate card while the original 1 TB RetroPie card was left untouched — an approach worth copying. That original was then imaged, the image verified against its checksums, and the finished system migrated onto it; the build card is now the rollback.</p>
+    <p style="color: var(--ink-faint); font-size: 0.82rem;">Unaffiliated with Experimental Pi. The <code>xpi_gamecon</code> driver is the vendor's, GPL-licensed; the fan daemon is new.</p>
+  </footer>
+
+</div>

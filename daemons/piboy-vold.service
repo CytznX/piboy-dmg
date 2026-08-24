@@ -1,0 +1,25 @@
+[Unit]
+Description=PiBoy DMG volume wheel -> ALSA mixer
+# sound.target alone is not enough: open_wheel() needs the ABS_VOLUME input
+# device that xpi_gamecon creates, and exits 1 if it is absent. With
+# Restart=always/RestartSec=5 under StartLimitBurst=10 in 120s, a boot where the
+# module loads late burns all ten attempts in ~50s and the unit fails
+# permanently - the volume wheel is then dead until someone intervenes.
+# piboy-fand already orders itself this way; this unit did not.
+After=sound.target systemd-modules-load.service
+Wants=systemd-modules-load.service
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/piboy-vold
+Restart=always
+RestartSec=5
+# Bound the stop: a blocked read() can otherwise hold shutdown past the ~31s
+# point where the XPi cuts the rail, i.e. mid-unmount.
+TimeoutStopSec=5
+SyslogIdentifier=piboy-vold
+
+[Install]
+WantedBy=multi-user.target

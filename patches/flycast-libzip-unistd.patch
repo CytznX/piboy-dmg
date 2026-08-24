@@ -1,0 +1,26 @@
+--- zip_close.c.orig-backup	2026-08-24 03:42:59.270505311 +0100
++++ zip_close.c	2026-08-24 04:53:36.674659038 +0100
+@@ -42,8 +42,8 @@
+ 
+ #include "zipint.h"
+ 
+-#if defined(__APPLE__) || defined(__SWITCH__)
+-#include <unistd.h>
++#ifndef _WIN32
++#include <unistd.h>   /* close() - GCC 14 errors on implicit declaration */
+ #endif
+ 
+ static int add_data(struct zip *, struct zip_source *, struct zip_dirent *,
+
+# Why: flycast's bundled libzip includes <unistd.h> only on __APPLE__ and
+# __SWITCH__, so on Linux close() is implicitly declared. GCC 14 promotes
+# implicit declarations from warning to ERROR, so the build dies at
+#   core/deps/libzip/zip_close.c:666: implicit declaration of function 'close'
+#
+# unistd.h exists on every POSIX platform; only Windows lacks it, hence
+# the guard becomes #ifndef _WIN32.
+#
+# NOTE: this patches RetroPie-Setup/tmp/build/, which is BUILD SCRATCH and
+# is wiped on cleanup or re-install. Reinstalling lr-flycast re-downloads
+# the unpatched source and fails again. Re-apply then rebuild with:
+#   sudo ./retropie_packages.sh lr-flycast build install configure
