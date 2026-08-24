@@ -29,7 +29,7 @@ PiBoy pad and a plugged-in USB pad without per-device configuration, and picks
 up hotplugged pads (notably Bluetooth, which reconnects long after boot) via
 inotify rather than a rescan timer.
 """
-import ctypes, fcntl, os, glob, select, signal, struct, sys, time
+import collections, ctypes, fcntl, os, glob, select, signal, struct, sys, time
 
 EV_SYN      = 0x00
 EV_KEY      = 0x01
@@ -172,6 +172,14 @@ DEBOUNCE  = 0.3             # udev emits CREATE then several ATTRIB per node;
                             # pass instead of four to six.
 POLL      = 2.0             # only when inotify is unavailable: then a slow scan
                             # is the sole way a device is ever noticed.
+RETRY     = 1.0             # re-open window after an open() failed
+RETRY_MAX = 5               # ...bounded, so a node that can never be opened
+                            # cannot become a permanent 1Hz wakeup.
+
+# Named rather than positional: a previous edit changed this function's arity
+# and left one of three call sites unpacking the old count, which is a runtime
+# error, so it passed every syntax check and crashlooped the service instead.
+Sync = collections.namedtuple('Sync', 'added removed masked failed')
 
 
 def inotify_watch(path='/dev/input'):
@@ -207,7 +215,7 @@ def drop_fd(fd, fds, held):
 
 
 def sync_pads(fds, held):
-    """Reconcile `fds` with /dev/input as it is now -> (added, removed, masked).
+    """Reconcile `fds` with /dev/input as it is now -> Sync(added, removed, masked, failed).
 
     Incremental on purpose. Closing and reopening everything would discard
     `held`, and any device whose buttons happened to be down at that moment
@@ -215,13 +223,14 @@ def sync_pads(fds, held):
     hatch is dead for the process lifetime.
     """
     current = set(glob.glob('/dev/input/event*'))
-    added = masked = removed = 0
+    added = masked = removed = failed = 0
 
     for path in sorted(current - set(fds.values())):
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
         except OSError:
-            continue                       # not chowned yet; IN_ATTRIB will re-wake us
+            failed += 1                    # often just "udev has not chowned it yet"
+            continue
         if filter_to_buttons(fd):
             masked += 1
         fds[fd] = path
@@ -232,7 +241,7 @@ def sync_pads(fds, held):
             drop_fd(fd, fds, held)
             removed += 1
 
-    return added, removed, masked
+    return Sync(added, removed, masked, failed)
 
 def main():
     running = True
@@ -257,23 +266,32 @@ def main():
 
     held = {}                                   # fd -> set of codes currently down
     fds = {}
-    _, _, masked = sync_pads(fds, held)
-    log(f"watching {len(fds)} input devices ({masked} kernel-filtered to Start/Select); "
-        f"{HOLD:.0f}s to escape, {HOLD_FORCE:.0f}s to force")
 
+    # Install the watch BEFORE the first scan. The other order silently drops
+    # every event in the gap, and with inotify up nothing else ever re-scans.
+    # This unit is only After=multi-user.target, so it can start while udev is
+    # still settling: a node not yet chowned to root:input fails to open, its
+    # chown fires IN_ATTRIB before the watch exists, and that pad is missed for
+    # the entire session with nothing logged.
     ino = inotify_watch()
     if ino is None:
-        log("inotify unavailable - a pad that connects later will not be watched")
+        log("inotify unavailable - falling back to a slow /dev/input poll")
+
+    first = sync_pads(fds, held)
+    log(f"watching {len(fds)} input devices ({first.masked} kernel-filtered to Start/Select); "
+        f"{HOLD:.0f}s to escape, {HOLD_FORCE:.0f}s to force")
 
     armed = True                                # require release before re-firing
     since = None                                # when the combo became complete
     next_try = 0.0                              # backoff for declined soft escapes
     # One deadline governs every re-scan of /dev/input: it absorbs the burst of
-    # CREATE/ATTRIB events udev fires per node, and when inotify is unavailable
-    # it degrades to a slow poll, which is then the only path to noticing a
-    # device at all. Zero means nothing is pending - the idle case, and the one
-    # that must never cost a wakeup.
-    rescan_at = 0.0 if ino is not None else time.time() + POLL
+    # CREATE/ATTRIB events udev fires per node, retries an open that failed, and
+    # degrades to a slow poll when inotify is unavailable. Zero means nothing is
+    # pending - the idle case, and the one that must never cost a wakeup.
+    retries = RETRY_MAX
+    rescan_at = (time.time() + RETRY if first.failed
+                 else 0.0 if ino is not None
+                 else time.time() + POLL)
 
     while running:
         # Block indefinitely when no combo is in progress: the 0.25s poll only
@@ -287,34 +305,64 @@ def main():
             timeout = 0.25                 # timing a hold
         elif rescan_at:
             timeout = max(0.0, rescan_at - time.time())
-        elif fds or ino is not None:
-            timeout = None                 # an event or inotify will wake us
+        elif fds:
+            timeout = None                 # an input event or inotify will wake us
         else:
-            timeout = 2.0                  # nothing to sleep on; never block forever
+            timeout = POLL                 # nothing open: never block forever, or
+                                           # a daemon that lost every device has no
+                                           # way back even with inotify healthy
 
         watch = list(fds) + [wake_r] + ([ino] if ino is not None else [])
         try:
             ready, _, _ = select.select(watch, [], [], timeout)
         except (select.error, OSError):
+            # The offending fd may be a device OR the inotify fd, and select does
+            # not say which. Rebuild both: leaving a broken inotify fd in `watch`
+            # makes every subsequent select raise, which spins a core until the
+            # unit is stopped.
             for fd in list(fds):
                 drop_fd(fd, fds, held)
+            if ino is not None:
+                try: os.close(ino)
+                except OSError: pass
+                ino = inotify_watch()
             sync_pads(fds, held)
+            retries = RETRY_MAX
+            rescan_at = 0.0 if ino is not None else time.time() + POLL
             continue
 
         if ino is not None and ino in ready:
-            try: os.read(ino, 4096)        # drain; which file changed does not matter
-            except OSError: pass
-            rescan_at = time.time() + DEBOUNCE
+            try:
+                data = os.read(ino, 4096)  # drain; which entry changed is irrelevant
+            except OSError:
+                # A readable fd that will not read spins select at 100% forever,
+                # so never just swallow this - replace the watch.
+                data = b''
+                try: os.close(ino)
+                except OSError: pass
+                ino = inotify_watch()
+            if data:
+                retries = RETRY_MAX
+            rescan_at = time.time() + (DEBOUNCE if ino is not None else POLL)
 
         if rescan_at and time.time() >= rescan_at:
-            added, removed, masked = sync_pads(fds, held)
-            if added or removed:
-                log(f"input devices changed (+{added} -{removed}); "
-                    f"watching {len(fds)} ({masked} newly filtered)")
-            # Re-arm only in the degraded case. With inotify up, a node that was
-            # not openable this pass raises IN_ATTRIB the moment udev chowns it,
-            # which schedules the next reconcile by itself.
-            rescan_at = time.time() + POLL if ino is None else 0.0
+            r = sync_pads(fds, held)
+            if r.added or r.removed:
+                log(f"input devices changed (+{r.added} -{r.removed}); "
+                    f"watching {len(fds)} ({r.masked} newly filtered)")
+            # A failed open is not always the udev chown that IN_ATTRIB reports
+            # on its own. ENODEV while a Bluetooth pad flaps, EMFILE, or a node
+            # never chowned into `input` produce no further event at all - so
+            # without this retry that device stays unwatched, and silently.
+            if r.failed and retries > 0:
+                retries -= 1
+                rescan_at = time.time() + RETRY
+                if retries == 0:
+                    log(f"{r.failed} device(s) could not be opened; not retrying")
+            elif ino is None:
+                rescan_at = time.time() + POLL
+            else:
+                rescan_at = 0.0
 
         if wake_r in ready:
             try: os.read(wake_r, 64)       # drain; the flag is already set
@@ -333,6 +381,12 @@ def main():
                 # process lifetime: `since` never resets, `armed` never returns,
                 # and the escape hatch can never fire again.
                 drop_fd(fd, fds, held)
+                # The node may still exist - a transient EIO on a marginal link,
+                # not a removal - in which case no IN_DELETE is coming and nothing
+                # would ever look at it again. Schedule a reconcile so it can be
+                # re-opened rather than lost until the process restarts.
+                soon = time.time() + DEBOUNCE
+                rescan_at = soon if not rescan_at else min(rescan_at, soon)
                 continue
             for off in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
                 _, _, etype, code, value = struct.unpack('llHHi', data[off:off + EV_SIZE])
