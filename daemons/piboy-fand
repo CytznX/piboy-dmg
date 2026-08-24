@@ -14,11 +14,11 @@
 
 LEDDIR=/sys/class/leds/piboy:green:status   # LED class (kernel animates it)
 PSY=/sys/class/power_supply/xpi-battery     # standard battery interface
-STAT=/sys/kernel/xpi_gamecon/status         # vendor node; no standard equivalent
+STAT=/sys/kernel/xpi_gamecon/status         # Experimental Pi's node; no standard equivalent
 
 INTERVAL=5
 
-# Prefer the hwmon pwm1 the driver registers; fall back to the vendor node so a
+# Prefer the hwmon pwm1 the driver registers; fall back to Experimental Pi node so a
 # rolled-back module still works. Re-resolvable: the hwmonN index changes if the
 # module is reloaded, and a path fixed at startup would then fail forever.
 resolve_fan() {
@@ -39,7 +39,7 @@ for z in /sys/class/thermal/thermal_zone*; do
 done
 [ -n "$TEMP" ] || TEMP=/sys/class/thermal/thermal_zone0/temp
 
-# millidegrees:duty, high to low. Vendor osd.cfg bands plus a 100% top band.
+# millidegrees:duty, high to low. Experimental Pi's osd.cfg bands plus a 100% top band.
 FAN_CURVE="78000:255 75000:191 70000:128 65000:102 60000:77 55000:51 50000:26"
 FAN_HYST=3500        # measured idle temp swing is ~2400; less than that flaps
 

@@ -1,7 +1,7 @@
 # PiBoy DMG on 64-bit Raspberry Pi OS
 
 Porting a [PiBoy DMG](https://experimentalpi.com/) handheld — Raspberry Pi 4B, 3.5" 640×480 DPI
-panel, XPi controller board — from the vendor's 32-bit RetroPie/Buster image onto
+panel, XPi controller board — from Experimental Pi's 32-bit RetroPie/Buster image onto
 **64-bit Raspberry Pi OS Trixie**, after Experimental Pi shut down and support ended.
 
 Everything here was worked out against real hardware. The [build document](docs/piboy-build-doc.html)
@@ -10,7 +10,7 @@ ones that cost hours and the theories that turned out to be wrong.
 
 ## Why this exists
 
-The vendor is gone. The 32-bit image still works but nothing will ever update it,
+Experimental Pi is gone. The 32-bit image still works but nothing will ever update it,
 and the controller driver is an out-of-tree module written against kernel 5.10 that
 does not build on 6.x. Anyone who wants to keep one of these running has to do this
 work; this is one worked example.
@@ -19,7 +19,7 @@ work; this is one worked example.
 
 | Path | What it is |
 |---|---|
-| `driver/` | `xpi_gamecon` ported 5.10 → 6.18, plus the vendor original and a diff |
+| `driver/` | `xpi_gamecon` ported 5.10 → 6.18, plus Experimental Pi original and a diff |
 | `daemons/` | Fan curve, volume wheel, and a Start+Select escape hatch for console emulators |
 | `migration/` | Image the original card, repartition, copy, rewrite PARTUUIDs, restore ROMs |
 | `scripts/` | ROM library tools: NeoGeo DAT rebuild, PS1 reorganisation, CHD conversion, scraping |
@@ -31,7 +31,7 @@ work; this is one worked example.
 
 `driver/xpi_gamecon.c` is a derivative of **Nathan Scherdin's GPL-licensed
 `xpi_gamecon`** shipped with the PiBoy DMG. It remains GPL-2.0 — see `LICENSE`.
-`xpi_gamecon.c.orig` is the unmodified vendor source; `xpi_gamecon.diff` is the
+`xpi_gamecon.c.orig` is the unmodified Experimental Pi's source; `xpi_gamecon.diff` is the
 delta, so you can see exactly what changed.
 
 The port adds, beyond making it compile:
@@ -51,7 +51,7 @@ Everything else in this repo is MIT-licensed; see `LICENSE-MIT`.
 - **`config.txt` silently truncates lines at 98 characters.** A long `dtoverlay=`
   line loses its tail with no error — the panel then runs at the wrong resolution
   or not at all. Split into `dtparam=` lines.
-- **The board runs permanently under-voltage** and the vendor hid it with
+- **The board runs permanently under-voltage** and Experimental Pi hid it with
   `avoid_warnings=2`. Without that line the CPU is pinned at 600 MHz. With it you
   get full speed and the dips are simply not reported.
 - **Soft reboot does not come back.** The XPi cuts power on halt and does not

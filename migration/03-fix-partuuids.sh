@@ -82,7 +82,7 @@ STALE=$(grep -hoE 'PARTUUID=[0-9a-fA-F]{8}-[0-9]{2}' "$FSTAB" "$CMDLINE" | sort 
 [ -z "$STALE" ] || fail "stale PARTUUID still referenced: $STALE"
 echo "  no stale PARTUUIDs in fstab or cmdline"
 
-# The vendor overlay lines live in config.txt; a truncated copy boots to a black
+# Experimental Pi overlay lines live in config.txt; a truncated copy boots to a black
 # screen, so confirm the long-line workaround survived the copy.
 CFG=$TGT/boot/firmware/config.txt
 if [ -f "$CFG" ]; then

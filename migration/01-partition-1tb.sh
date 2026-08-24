@@ -15,7 +15,7 @@
 #     into a smaller target - which would have made root.pcl.zstd unrestorable to
 #     the very card it came from, right after wiping the only physical copy.
 #   - label-id 0xe22bcd10 is preserved, so PARTUUID=e22bcd10-01/-02 keep meaning
-#     what they meant. A future restore of the vendor image needs no hand-editing.
+#     what they meant. A future restore of Experimental Pi image needs no hand-editing.
 #   - p1 stays 256M/type=6/bootable to match. Trixie's boot files use ~49M of it,
 #     and the Pi firmware does not care about the MBR type byte.
 set -euo pipefail

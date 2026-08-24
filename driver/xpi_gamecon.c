@@ -178,7 +178,7 @@ static ssize_t green_show(struct kobject *kobj, struct kobj_attribute *attr, cha
 static ssize_t green_store(struct kobject *kobj, struct kobj_attribute *attr,const char *buf, size_t count) { sscanf(buf,"%d",&values.green_val); return count; }
 
 static ssize_t fan_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf){ return sprintf(buf, "%d", values.fan_val); }
-/* Clamped, unlike the vendor original. An unclamped value is worse than merely
+/* Clamped, unlike Experimental Pi original. An unclamped value is worse than merely
  * wrong: the wire byte is (unsigned char)val, so writing 256 transmits 0 - fan
  * fully off - while values.fan_val reads 256, which makes the safety floor's
  * "values.fan_val < XPI_FAN_SAFE" test false AND stamps xpi_fan_last_set, so the
@@ -217,7 +217,7 @@ struct kobj_attribute flags = __ATTR(flags, 0660, flags_show, flags_store);
 /* Read-only on purpose. The driver does transmit red_val - the protocol
  * round-robins flags/fan/red/green, one per packet, and red goes out as
  * selector 0xC2 every fourth packet. The XPi simply ignores it, because
- * that channel is firmware-owned: the vendor documents the single
+ * that channel is firmware-owned: Experimental Pi documents the single
  * bi-colour LED going green -> yellow -> red as the pack drops below 25%,
  * and it lights even with no Pi communicating at all. A writable node that
  * silently does nothing sent two separate investigations down a dead end,

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Capture the original PiBoy DMG card (vendor RetroPie 4.8.12 / Raspbian buster).
+# Capture the original PiBoy DMG card (Experimental Pi's RetroPie 4.8.12 / Raspbian buster).
 #
 # The card's *contents* are never modified: no image is written back to it. Note
 # that unmounting does write to the card (journal close, superblock update) - it

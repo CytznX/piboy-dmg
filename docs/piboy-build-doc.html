@@ -347,7 +347,7 @@
     <div class="tones" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     <div class="eyebrow">Build reference · unofficial</div>
     <h1>PiBoy DMG 64-Bit Port</h1>
-    <p class="standfirst">Getting a PiBoy DMG onto 64-bit Raspberry Pi OS Trixie after Experimental Pi shut down — display, audio, controller driver, fan control and charging, rebuilt from the vendor's own settings — then migrated onto the card the handheld shipped with, and the game library and controls put back in order.</p>
+    <p class="standfirst">Getting a PiBoy DMG onto 64-bit Raspberry Pi OS Trixie after Experimental Pi shut down — display, audio, controller driver, fan control and charging, rebuilt from Experimental Pi's own settings — then migrated onto the card the handheld shipped with, and the game library and controls put back in order.</p>
     <div class="meta">
       <span><b>Hardware</b> Pi 4B rev 1.4, 8 GB</span>
       <span><b>Target</b> Trixie arm64, kernel 6.18</span>
@@ -357,7 +357,7 @@
   </header>
 
   <section>
-    <p>The vendor is gone, and its last official image — PiBoy DMG 1.0.7, June 2024 — is 32-bit RetroPie on an end-of-life Debian. There is no supported 64-bit path, and RetroPie itself has never shipped an official aarch64 image. Everything below was worked out by hand from the vendor's own <code>config.txt</code> and the GPL driver source left behind on the original card.</p>
+    <p>Experimental Pi is gone, and its last official image — PiBoy DMG 1.0.7, June 2024 — is 32-bit RetroPie on an end-of-life Debian. There is no supported 64-bit path, and RetroPie itself has never shipped an official aarch64 image. Everything below was worked out by hand from Experimental Pi's own <code>config.txt</code> and the GPL driver source left behind on the original card.</p>
     <p>It works. The panel, audio, controls, battery telemetry and fan all come up from cold with no HDMI attached and no intervention.</p>
 
     <div class="tscroll">
@@ -396,7 +396,7 @@
     <div class="traps">
       <div class="trap">
         <h3>Nothing answers the power switch, so every shutdown is unclean</h3>
-        <p>The switch does not cut the rail directly. It tells the XPi, which asserts a shutdown request and then waits before killing power. The driver already decodes it — <code>stat_val = data[5]&amp;0xC6; //VBus,Shutdown,VSTAT2,VSTAT1</code> — but nothing acts on it, and no <code>gpio-shutdown</code> overlay exists (the vendor's config had none either; their closed <code>osd</code> binary was the listener).</p>
+        <p>The switch does not cut the rail directly. It tells the XPi, which asserts a shutdown request and then waits before killing power. The driver already decodes it — <code>stat_val = data[5]&amp;0xC6; //VBus,Shutdown,VSTAT2,VSTAT1</code> — but nothing acts on it, and no <code>gpio-shutdown</code> overlay exists (Experimental Pi's config had none either; their closed <code>osd</code> binary was the listener).</p>
         <p>Measured on this hardware: the bit is <strong><code>0x40</code>, active-low</strong>, and there are <strong>~31 seconds</strong> between the request and the rail dropping.</p>
 <pre><code>05:02:14  XPi status 198 -&gt; 134   (0xC6 -&gt; 0x86)   <span class="c">switch OFF</span>
 05:02:45  ...log simply stops...                    <span class="c">power cut</span>
@@ -408,7 +408,7 @@ shutdown markers in that boot: 0</code></pre>
       <div class="trap">
         <h3>Raspberry Pi OS silently forces volatile journald</h3>
         <p><code>/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf</code> sets <code>Storage=volatile</code> to spare the SD card, and drop-ins beat <code>journald.conf</code>. So creating <code>/var/log/journal</code> and setting <code>Storage=persistent</code> in the main file <strong>appears to work and does nothing</strong> — journald even reports success while still writing to <code>/run</code>. Every crash keeps vanishing, and <code>journalctl -b -1</code> stays empty.</p>
-        <p>Override with a later-sorting drop-in in <code>/etc</code>, and cap the size since you are re-enabling flash writes the vendor deliberately disabled:</p>
+        <p>Override with a later-sorting drop-in in <code>/etc</code>, and cap the size since you are re-enabling flash writes Experimental Pi deliberately disabled:</p>
 <pre><code><span class="c"># /etc/systemd/journald.conf.d/50-persistent.conf</span>
 [Journal]
 Storage=persistent
@@ -417,8 +417,8 @@ SystemMaxUse=64M</code></pre>
       </div>
 
       <div class="trap">
-        <h3>The board runs permanently under-voltage — and the vendor hid it</h3>
-        <p>The XPi's boost converter cannot hold the 4.63 V the Pi's under-voltage comparator expects; that detector is calibrated for a wall supply, not a battery handheld. The vendor's answer was <code>avoid_warnings=2</code>, which does not merely suppress the warning icon — it <strong>disables the firmware's throttling response</strong>. Omit it and the firmware parks the SoC at its 600 MHz floor and never releases it.</p>
+        <h3>The board runs permanently under-voltage — and Experimental Pi hid it</h3>
+        <p>The XPi's boost converter cannot hold the 4.63 V the Pi's under-voltage comparator expects; that detector is calibrated for a wall supply, not a battery handheld. Experimental Pi's answer was <code>avoid_warnings=2</code>, which does not merely suppress the warning icon — it <strong>disables the firmware's throttling response</strong>. Omit it and the firmware parks the SoC at its 600 MHz floor and never releases it.</p>
         <p>Measured on a stock 1800 MHz config: <strong>6436 ms clamped versus 2295 ms with the setting restored — 2.8× — </strong>and <code>throttled</code> goes from <code>0x50005</code> to a clean <code>0x0</code>. It presents perfectly as a bad PSU or cable. It is neither, and no supply will fix it.</p>
         <p>An <a href="https://github.com/raspberrypi/firmware/issues/1834">open firmware issue</a> reports the setting failing on Bookworm. It works on Trixie. Understand what you are accepting: the rail genuinely does sag, and you are choosing to ride through the dips rather than back off — so be scrupulous about clean shutdowns.</p>
       </div>
@@ -444,12 +444,12 @@ SystemMaxUse=64M</code></pre>
       <div class="trap">
         <h3>DPI and PWM audio both want GPIO 18</h3>
         <p>The default DPI pinctrl is the contiguous 18-bit group, GPIO 0–21, which includes pin 18. Add <code>audremap,pins_18_19</code> and the two collide — <code>vc4_dpi</code> fails to claim the pin, tears itself down, and <strong>takes all of KMS with it</strong>. You lose the panel, HDMI and HDMI audio at once, which looks nothing like a pin conflict.</p>
-        <p>The <code>rgb666-padhi</code> layout exists precisely to avoid this: it skips 10, 11, 18 and 19, leaving 18/19 free for audio. That is why the vendor chose it.</p>
+        <p>The <code>rgb666-padhi</code> layout exists precisely to avoid this: it skips 10, 11, 18 and 19, leaving 18/19 free for audio. That is why Experimental Pi chose it.</p>
       </div>
 
       <div class="trap">
         <h3>A kernel update silently orphans the module — and never <code>rmmod</code> it</h3>
-        <p>Modules install under <code>/lib/modules/$(uname -r)/</code>. An <code>apt</code> upgrade that pulls a new kernel (ours went 6.18.34 → 6.18.39 mid-session) leaves the module behind at the old path, so after the next boot there is no controller, no telemetry and <strong>no fan control</strong>, silently. Rebuild against the running kernel, or better, register it with DKMS so upgrades rebuild it for you — which is exactly what the vendor did.</p>
+        <p>Modules install under <code>/lib/modules/$(uname -r)/</code>. An <code>apt</code> upgrade that pulls a new kernel (ours went 6.18.34 → 6.18.39 mid-session) leaves the module behind at the old path, so after the next boot there is no controller, no telemetry and <strong>no fan control</strong>, silently. Rebuild against the running kernel, or better, register it with DKMS so upgrades rebuild it for you — which is exactly what Experimental Pi did.</p>
         <p>Separately: do not <code>rmmod xpi_gamecon</code> on a running device. The XPi microcontroller is what supplies power to the Pi, and the driver talks to it at 125 Hz. Stop that conversation and the board appears to conclude the host is gone — ours powered off mid-command. Install the new <code>.ko</code> and reboot instead.</p>
       </div>
 
@@ -541,7 +541,7 @@ time dd if=/dev/zero bs=1M count=300 2>/dev/null | sha256sum
 
       <li>
         <h3>Build the controller driver</h3>
-        <p>The GPL source lives at <code>/usr/src/xpi_gamecon-1.0</code> on the original card — 556 lines, bit-banging a two-wire protocol to the XPi microcontroller on GPIO 26/27. Three edits make it build on 6.18. The vendor's Makefile also has <code>KVERSION := 'uname -r'</code> in single quotes, which expands to a literal string; use <code>$(shell uname -r)</code>.</p>
+        <p>The GPL source lives at <code>/usr/src/xpi_gamecon-1.0</code> on the original card — 556 lines, bit-banging a two-wire protocol to the XPi microcontroller on GPIO 26/27. Three edits make it build on 6.18. Experimental Pi's Makefile also has <code>KVERSION := 'uname -r'</code> in single quotes, which expands to a literal string; use <code>$(shell uname -r)</code>.</p>
 <pre><code>#include &lt;linux/of.h&gt;          <span class="c">// of_device.h no longer pulls this in</span>
 #include &lt;linux/version.h&gt;
 
@@ -564,7 +564,7 @@ echo xpi_gamecon | sudo tee /etc/modules-load.d/xpi_gamecon.conf</code></pre>
 
       <li>
         <h3>Replace the fan controller</h3>
-        <p>The vendor's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see the closing section. Until something replaces it the fan is unmanaged, so do this before any sustained load. The daemon below reproduces the vendor's <code>osd.cfg</code> bands and adds a full-speed band above 78 °C that the original lacked.</p>
+        <p>Experimental Pi's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see the closing section. Until something replaces it the fan is unmanaged, so do this before any sustained load. The daemon below reproduces Experimental Pi's <code>osd.cfg</code> bands and adds a full-speed band above 78 °C that the original lacked.</p>
 <pre><code>duty_for() {   <span class="c"># millidegrees -&gt; 0..255 PWM</span>
     local t=$1
     if   [ "$t" -ge 78000 ]; then echo 255   <span class="c"># 100%  (added)</span>
@@ -607,7 +607,7 @@ ctl.!default { type hw;   card Headphones }</code></pre>
 
       <li>
         <h3>Expose the battery properly</h3>
-        <p>Do not reimplement the vendor's overlay. Register the pack as a standard <code>power_supply</code> device in the driver and EmulationStation, RetroArch and every other tool pick it up natively — no drawing code, no DRM planes. Roughly 80 lines, backed by values the driver already polls.</p>
+        <p>Do not reimplement Experimental Pi's overlay. Register the pack as a standard <code>power_supply</code> device in the driver and EmulationStation, RetroArch and every other tool pick it up natively — no drawing code, no DRM planes. Roughly 80 lines, backed by values the driver already polls.</p>
         <p>Guard the startup window: <code>percent_val</code> is <code>0</code> until the first XPi packet arrives, and advertising an empty battery — even briefly — invites an emergency shutdown on any system running battery policy. Gate on the driver's <code>lastgood</code> counter and report <code>UNKNOWN</code> until real data exists.</p>
       </li>
 
@@ -633,7 +633,7 @@ sudo ./retropie_packages.sh autostart enable</code></pre>
   <section>
     <div class="eyebrow">Sequence</div>
     <h2>Moving to the real card</h2>
-    <p>The build above happens on a small spare card, which is the right way to do it. But the finished system has to end up on the card the handheld shipped with — and on this hardware that card still holds the only copy of the vendor's image. Everything below is shaped by that: the moment you format the target, the original exists nowhere else.</p>
+    <p>The build above happens on a small spare card, which is the right way to do it. But the finished system has to end up on the card the handheld shipped with — and on this hardware that card still holds the only copy of Experimental Pi's image. Everything below is shaped by that: the moment you format the target, the original exists nowhere else.</p>
 
     <h3>Image the original first, and verify the image</h3>
     <p>Use <code>partclone</code>, not <code>dd</code>. It walks the filesystem and copies allocated blocks only, so a 939 GB partition holding 35 GB of data yields a 23 GB archive instead of a 939 GB one. Pipe it straight into <code>zstd</code>.</p>
@@ -646,7 +646,7 @@ sha256sum *.pcl.zstd partition-table.sfdisk &gt; MANIFEST.txt</code></pre>
     <h3>Replay the captured table — do not invent a layout</h3>
     <p>The obvious move is to write a fresh partition table sized for the new card. It is also the one that quietly destroys the rollback. A hand-rolled layout with a different start sector made p2 <strong>263 MiB smaller</strong> than the original, and <code>partclone</code> refuses to restore into a smaller target — which would have rendered the 23 GB image unrestorable to the very card it came from, discovered only after that card had been formatted.</p>
 <pre><code>sfdisk /dev/mmcblk0 &lt; partition-table.sfdisk</code></pre>
-    <p>Replaying the dump verbatim also preserves the MBR label-id, so <code>PARTUUID</code>s keep meaning what they meant and a future restore of the vendor image needs no hand-editing.</p>
+    <p>Replaying the dump verbatim also preserves the MBR label-id, so <code>PARTUUID</code>s keep meaning what they meant and a future restore of Experimental Pi image needs no hand-editing.</p>
     <div class="note warn"><strong><code>findmnt &lt;a&gt; &lt;b&gt;</code> is not "check these two devices."</strong> The two-argument form means <em>source</em> and <em>target</em>, so a guard written that way silently passes while checking something you did not mean. Use <code>--source</code> and <code>--target</code> explicitly. Worth stating plainly because this bug was written twice in one night, in two different scripts, both times inside a safety check.</div>
 
     <h3>Copy at file level — and measure the link before blaming rsync</h3>
@@ -686,7 +686,7 @@ sed -i -E "s#root=PARTUUID=[0-9a-fA-F-]+#root=PARTUUID=${P2}#" \
 
     <h3>Restore bulk data locally, never across the network</h3>
     <p>ROMs are the largest thing on the card and the least suited to a network copy. Put the backup medium in the handheld and copy disk-to-disk: 26 GB over USB is minutes, the same 26 GB over a shared Wi-Fi link is most of a day.</p>
-    <div class="note warn"><strong>Do not extract as root.</strong> EmulationStation runs as the console user; ROMs owned by root are readable but it can never write a gamelist or scrape artwork. Extract as the ordinary user and have the script refuse if invoked under <code>sudo</code> — use <code>sudo</code> only for mounting the backup medium, read-only. Restore ROMs and BIOS only: the vendor's <code>retropie-configs</code> and dotfiles name 32-bit emulator binaries and paths that do not exist in this build, and restoring them wholesale replaces a working configuration with one pointing at nothing.</div>
+    <div class="note warn"><strong>Do not extract as root.</strong> EmulationStation runs as the console user; ROMs owned by root are readable but it can never write a gamelist or scrape artwork. Extract as the ordinary user and have the script refuse if invoked under <code>sudo</code> — use <code>sudo</code> only for mounting the backup medium, read-only. Restore ROMs and BIOS only: Experimental Pi's <code>retropie-configs</code> and dotfiles name 32-bit emulator binaries and paths that do not exist in this build, and restoring them wholesale replaces a working configuration with one pointing at nothing.</div>
     <p>Finally, a system copied this way shares its <code>machine-id</code> with the card it came from. Keep the build card as a rollback — it is a complete working system and a thirty-second recovery — but never let both boot onto the network at once, or they will contest the same DHCP identity.</p>
 
     <div class="note"><strong>What the finished migration looks like.</strong> <code>/</code> at 938 G on <code>PARTUUID=e22bcd10-02</code>, 2000 MHz under load, <code>throttled=0x0</code> at 1.01 V and 72.5 °C, driver loaded, both daemons active. Confirm the root <code>PARTUUID</code> the kernel actually used — not the one you wrote — since that is the only proof the rewrite took.</div>
@@ -818,7 +818,7 @@ input_player1_btn_b = "8"</code></pre>
   </section>
   <section>
     <div class="eyebrow">Reference</div>
-    <h2>Translating the vendor's display config</h2>
+    <h2>Translating Experimental Pi's display config</h2>
     <p>The original ran legacy fkms, where timings were a firmware-parsed string. Under full KMS the same numbers become device-tree properties. This mapping is the core of the port.</p>
 
     <div class="tscroll">
@@ -837,7 +837,7 @@ input_player1_btn_b = "8"</code></pre>
       </table>
     </div>
 
-    <p>The output format decodes by nibble: low nibble <code>6</code> is 18-bit RGB666 CFG2, the next nibble <code>1</code> is RGB ordering. CFG2 <em>is</em> the pad-high pin layout, which is why the vendor also carried <code>gpio=0-9,12-17,20-25=a2</code>. Under KMS the overlay handles that muxing itself. Confirm the result in the live tree — <code>bus-format</code> should read <code>0x1015</code>, not the default <code>0x1009</code>:</p>
+    <p>The output format decodes by nibble: low nibble <code>6</code> is 18-bit RGB666 CFG2, the next nibble <code>1</code> is RGB ordering. CFG2 <em>is</em> the pad-high pin layout, which is why Experimental Pi also carried <code>gpio=0-9,12-17,20-25=a2</code>. Under KMS the overlay handles that muxing itself. Confirm the result in the live tree — <code>bus-format</code> should read <code>0x1015</code>, not the default <code>0x1009</code>:</p>
 
 <pre><code>od -An -tx4 --endian=big /proc/device-tree/panel/*bus*format*
 cat /sys/class/drm/card0-DPI-1/modes</code></pre>
@@ -875,30 +875,30 @@ cat /sys/class/drm/card0-DPI-1/modes</code></pre>
       </table>
     </div>
 
-    <div class="note">The <code>fan</code> scale catches people out. The vendor's <code>osd.cfg</code> lists its bands as percentages, so a configured 20 % appears here as <code>51</code>. Anything that treats the node as 0–100 will run the fan at roughly 40 % of what you asked for.</div>
+    <div class="note">The <code>fan</code> scale catches people out. Experimental Pi's <code>osd.cfg</code> lists its bands as percentages, so a configured 20 % appears here as <code>51</code>. Anything that treats the node as 0–100 will run the fan at roughly 40 % of what you asked for.</div>
   </section>
 
   <section>
     <h2>Three things that were not bugs</h2>
     <p>Worth recording, because each looks like an obvious defect and none needs fixing.</p>
     <p>The driver derives the peripheral base by reading the <code>/soc</code> <code>ranges</code> property by <code>u32</code> index — which ought to break under a 64-bit kernel's two-cell parent addresses. It doesn't. The author wrote a fallback that reads index 1, sees the high word <code>0x00000000</code>, and drops to index 2 for <code>0xfe000000</code>. It resolves correctly on both architectures.</p>
-    <p>Similarly, the panel needed no sync-polarity inversion. The vendor's timings carried <code>h_sync_polarity=1</code> and <code>v_sync_polarity=1</code>, which map onto the overlay's defaults; adding <code>hsync-invert</code>/<code>vsync-invert</code> would have broken a working display.</p>
+    <p>Similarly, the panel needed no sync-polarity inversion. Experimental Pi's timings carried <code>h_sync_polarity=1</code> and <code>v_sync_polarity=1</code>, which map onto the overlay's defaults; adding <code>hsync-invert</code>/<code>vsync-invert</code> would have broken a working display.</p>
 
     <h3>The red LED ignores you, and should</h3>
     <p>Writes to <code>green</code> work and are true PWM brightness — <code>15</code> is visibly dimmer than <code>100</code>, so pulsing and breathing patterns are available. Writes to <code>red</code> do nothing at any value, alone or combined, even though the element clearly lights on its own. That reads as a broken output. It is not.</p>
     <p>The driver <em>does</em> transmit the value. The outbound protocol round-robins four settings, one per packet, selected by a high byte:</p>
 <pre><code>data[GC_LENGTH+0] = 0xC0 | (index &amp; 0x3);      <span class="c">// 0xC2 = red, 0xC3 = green</span>
 data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan, red, green</span></code></pre>
-    <p>Red goes out as selector <code>0xC2</code> every fourth packet and the XPi discards it, because that channel is firmware-owned. The vendor documents a single <strong>bi-colour</strong> LED whose red element is a battery gauge: green at 25% or above, then yellow, then a second yellow, then red as the pack drains. It also lights with no battery fitted, and flashes a green-then-red diagnostic when the Pi is not communicating at all — behaviour that cannot involve software running on the Pi.</p>
+    <p>Red goes out as selector <code>0xC2</code> every fourth packet and the XPi discards it, because that channel is firmware-owned. Experimental Pi documents a single <strong>bi-colour</strong> LED whose red element is a battery gauge: green at 25% or above, then yellow, then a second yellow, then red as the pack drains. It also lights with no battery fitted, and flashes a green-then-red diagnostic when the Pi is not communicating at all — behaviour that cannot involve software running on the Pi.</p>
     <div class="note"><strong>Green is yours; red is the firmware's.</strong> Register green as a <code>leds</code> classdev and let the kernel animate it. Expose red read-only — a writable node that silently does nothing is worse than no node, and this one consumed two separate investigations. Note also that low-battery indication in a userland daemon duplicates what the firmware already signals on the same LED.</div>
-    <div class="note warn"><strong>A caution on method.</strong> Brief four-to-five second sweeps produced results that contradicted each other and sent us chasing a non-existent brightness-scale bug. Hold each state until it is confirmed by eye. Better still, check whether the vendor documented the behaviour before measuring at all — the answer here sat in a public troubleshooting page the whole time.</div>
+    <div class="note warn"><strong>A caution on method.</strong> Brief four-to-five second sweeps produced results that contradicted each other and sent us chasing a non-existent brightness-scale bug. Hold each state until it is confirmed by eye. Better still, check whether Experimental Pi documented the behaviour before measuring at all — the answer here sat in a public troubleshooting page the whole time.</div>
   </section>
 
   <section>
     <div class="eyebrow">Open</div>
     <h2>What is not solved</h2>
 
-    <h3>Replacing the vendor's OSD — mostly a solved problem</h3>
+    <h3>Replacing Experimental Pi's OSD — mostly a solved problem</h3>
     <p>The <code>osd</code> binary is a 32-bit armhf ELF linking <code>/opt/vc/lib/libbcm_host.so</code>, <code>libvchiq_arm.so</code> and <code>libvcos.so</code> — the legacy Broadcom VideoCore userland. That stack does not exist on 64-bit Raspberry Pi OS, dispmanx does not work under full KMS anyway, and multiarch cannot save it because those libraries were never ported. It will not run again.</p>
     <p>But it turns out it was doing four jobs, and only one of them was graphics:</p>
 
@@ -917,10 +917,10 @@ data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan
       </table>
     </div>
 
-    <p>Exposing the battery through the kernel's standard interface is a genuine improvement on what the vendor shipped: instead of a proprietary sysfs tree only their binary understood, every tool on the system can read it.</p>
+    <p>Exposing the battery through the kernel's standard interface is a genuine improvement on what Experimental Pi shipped: instead of a proprietary sysfs tree only their binary understood, every tool on the system can read it.</p>
 
     <h3>Drawing over a running game without dispmanx</h3>
-    <p>The obstacle is not drawing, it is <strong>DRM master exclusivity</strong>. The DPI CRTC has plenty of free overlay planes (<code>plane-1</code> is the primary; <code>plane-0</code>, <code>plane-2…9</code> sit unused), but only one process may hold DRM master on a CRTC, and EmulationStation and RetroArch each take it via SDL's KMSDRM backend. An independent overlay daemon cannot commit to those planes while a game owns the display. dispmanx let the vendor sidestep exactly this.</p>
+    <p>The obstacle is not drawing, it is <strong>DRM master exclusivity</strong>. The DPI CRTC has plenty of free overlay planes (<code>plane-1</code> is the primary; <code>plane-0</code>, <code>plane-2…9</code> sit unused), but only one process may hold DRM master on a CRTC, and EmulationStation and RetroArch each take it via SDL's KMSDRM backend. An independent overlay daemon cannot commit to those planes while a game owns the display. dispmanx let Experimental Pi sidestep exactly this.</p>
     <p>The cheap way through is to ask the app that <em>does</em> own the display to draw for you. RetroArch ships a UDP command interface:</p>
 <pre><code><span class="c"># retroarch.cfg</span>
 network_cmd_enable = "true"
@@ -928,7 +928,7 @@ network_cmd_port   = "55355"
 
 <span class="c"># push a message onto the running game — no netcat needed</span>
 exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 45%" &gt;&amp;3</code></pre>
-    <p><code>piboy-fand</code> fires this whenever the wheel moves, and again when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than the vendor's static meter, which you had to look at.</p>
+    <p><code>piboy-fand</code> fires this whenever the wheel moves, and again when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than Experimental Pi's static meter, which you had to look at.</p>
     <p>For the menu itself, <code>menu_battery_level_enable</code> shows charge in RGUI's top-right — but only alongside <code>menu_timedate_enable</code>, since in RGUI they share one status line. And note RetroPie's EmulationStation has <em>no</em> status display of any kind: no clock, no battery, nothing in the binary to enable.</p>
 
     <h3>What a real status bar would take</h3>
@@ -940,15 +940,15 @@ exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 
     <p><strong>Back up the binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
 
     <h3>Measured: leave the bit-bang clock alone</h3>
-    <p>The driver busy-spins in <code>udelay()</code> to clock its 2-wire protocol, and the half-period is a compile-time constant. Arithmetic suggests it costs a fifth of a core permanently, which makes lowering it look like the biggest available win. Make it a writable module parameter, add <em>cumulative</em> CRC counters (the vendor's <code>lastgood</code>/<code>lasterror</code> are consecutive-run counters and cannot express a rate), and sweep it:</p>
+    <p>The driver busy-spins in <code>udelay()</code> to clock its 2-wire protocol, and the half-period is a compile-time constant. Arithmetic suggests it costs a fifth of a core permanently, which makes lowering it look like the biggest available win. Make it a writable module parameter, add <em>cumulative</em> CRC counters (Experimental Pi's <code>lastgood</code>/<code>lasterror</code> are consecutive-run counters and cannot express a rate), and sweep it:</p>
 <pre><code>BITRATE  GOOD/s  CRC/s  ERR_RATE
-7        77      0      0.000%    <span class="c">vendor default</span>
+7        77      0      0.000%    <span class="c">Experimental Pi's default</span>
 6        77      0      0.000%
 5        76      0      0.000%    <span class="c">fastest error-free</span>
 4        77      0      0.129%    <span class="c">errors begin</span>
 3        76      0      0.774%
 2         0     78      100.00%   <span class="c">protocol collapses</span></code></pre>
-    <p>So the vendor's 7 has about two steps of margin and was not arbitrary. But no measurement supported changing it, and three separate attempts failed for three different reasons worth knowing:</p>
+    <p>So Experimental Pi's 7 has about two steps of margin and was not arbitrary. But no measurement supported changing it, and three separate attempts failed for three different reasons worth knowing:</p>
     <ul class="plain">
       <li><strong>softirq accounting reads zero</strong> — the kernel does not attribute <code>udelay()</code> busy-wait in a timer callback to softirq time.</li>
       <li><strong>A throughput benchmark shows nothing</strong>, even at bitrate 20 (nearly 3× the spin). The timer spins on one core while a single-threaded workload runs on another of four.</li>
@@ -957,7 +957,7 @@ exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 
     <p>The cost may well be real and simply invisible to every instrument on the device. Trading two steps of protocol margin — on the link carrying controls, battery telemetry <em>and</em> the power switch — for an unmeasurable saving is a bad bargain. A bench supply with a current meter on the rail would settle it in minutes; until then, leave it at 7.</p>
 
     <h3>Register with the kernel's subsystems, not a private sysfs tree</h3>
-    <p>The vendor exposed everything through one bespoke kobject — <code>/sys/kernel/xpi_gamecon/{fan,green,volume,battery,…}</code> — which only their binary understood. Four small registrations put the same hardware behind interfaces the rest of Linux already speaks, and each one deletes userspace code rather than adding it.</p>
+    <p>Experimental Pi exposed everything through one bespoke kobject — <code>/sys/kernel/xpi_gamecon/{fan,green,volume,battery,…}</code> — which only their binary understood. Four small registrations put the same hardware behind interfaces the rest of Linux already speaks, and each one deletes userspace code rather than adding it.</p>
 
     <div class="tscroll">
       <table>
@@ -999,18 +999,18 @@ exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 
     <p>Everything about the charge path checks out — VBus detection flips cleanly on unplug, the current reading tracks load and source correctly, and the pack demonstrably holds charge. But <code>amps</code> has never once read above zero, because the pack has been full or near-full every time it was measured. Two minutes on battery produces voltage sag, not depletion. Settling it needs a genuine 20&ndash;30 minute discharge followed by a plug-in, and until then it is unproven whether the sensor reports charge current at all or only discharge.</p>
 
     <h3>NeoGeo is blocked by content, not by software</h3>
-    <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The restored vendor backup did not contain one either, which means NeoGeo never worked on the original machine. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
+    <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The backup restored from Experimental Pi's own card did not contain one either, which means NeoGeo never worked on the original machine. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
 
     <h3>Soft reboot does not come back</h3>
     <p><code>systemctl reboot</code> takes the unit down and it stays down — the XPi appears to cut power on halt without re-asserting it, so the physical switch has to be flipped. Worth knowing before you issue a remote reboot on a device sitting in another room, and worth designing around if you script anything.</p>
 
-    <div class="note warn"><strong>The rail really is low.</strong> <code>avoid_warnings=2</code> restores full speed by suppressing the firmware's <em>reaction</em>, not by fixing the voltage — the XPi's boost output still dips below what the Pi expects. The vendor shipped it this way for years, so it is evidently survivable, but you are running the SoC through those dips. Treat clean shutdowns as mandatory and keep backups current.</div>
+    <div class="note warn"><strong>The rail really is low.</strong> <code>avoid_warnings=2</code> restores full speed by suppressing the firmware's <em>reaction</em>, not by fixing the voltage — the XPi's boost output still dips below what the Pi expects. Experimental Pi shipped it this way for years, so it is evidently survivable, but you are running the SoC through those dips. Treat clean shutdowns as mandatory and keep backups current.</div>
   </section>
 
   <footer>
     <div class="tones" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
     <p>Worked out against a PiBoy DMG with a Pi 4B rev 1.4, Raspberry Pi OS Trixie (2026-06-18, arm64 Lite), kernel 6.18.34. The build was done on a separate card while the original 1 TB RetroPie card was left untouched — an approach worth copying. That original was then imaged, the image verified against its checksums, and the finished system migrated onto it; the build card is now the rollback.</p>
-    <p style="color: var(--ink-faint); font-size: 0.82rem;">Unaffiliated with Experimental Pi. The <code>xpi_gamecon</code> driver is the vendor's, GPL-licensed; the fan daemon is new.</p>
+    <p style="color: var(--ink-faint); font-size: 0.82rem;">Unaffiliated with Experimental Pi. The <code>xpi_gamecon</code> driver is Experimental Pi's, GPL-licensed; the fan daemon is new.</p>
   </footer>
 
 </div>
