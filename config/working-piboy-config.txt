@@ -1,0 +1,65 @@
+[pi4]
+dtoverlay=vc4-fkms-v3d
+max_framebuffers=2
+#arm_64bit=1
+
+##Overclock Settings
+#arm_freq=2147
+arm_freq=2000
+arm_freq_min=500
+v3d_freq=750
+over_voltage=6
+#hdmi_enable_4kp60=1
+
+[all]
+##Base Settings
+avoid_warnings=2
+gpu_mem=256
+disable_overscan=1
+disable_splash=1
+boot_delay=0
+initial_turbo=60
+force_eeprom_read=0
+
+##Enable DPI gpio
+gpio=0-9,12-17,20-25=a2
+
+##Audio Settings
+dtparam=audio=on
+audio_pwm_mode=2
+dtoverlay=audremap,pins_18_19
+
+##HDMI Settings
+hdmi_group:1=2
+hdmi_mode:1=85
+hdmi_drive:1=2
+
+##Disable ACT LED
+dtparam=act_led_trigger=none
+dtparam=act_led_activelow=off
+  
+##Disable PWR LED
+dtparam=pwr_led_trigger=none
+dtparam=pwr_led_activelow=off
+
+##Turn off ethernet port LEDs
+dtparam=eth_led0=4
+dtparam=eth_led1=4
+
+##DPI LCD settings
+hvs_set_dither=0x210
+dpi_group=2
+dpi_mode=87
+dpi_output_format=0x070016 
+#dpi_timings=640 1 30 30 30 480 1 13 13 13 0 0 0 85 0 32200000 1        #maximum refresh allowed by Raspberry Pi firmware
+#dpi_timings=640 1 40 40 40 480 1 13 13 13 0 0 0 80 0 31600000 1
+#dpi_timings=640 1 60 60 60 480 1 13 13 13 0 0 0 75 0 32000000 1
+dpi_timings=640 1 80 80 80 480 1 13 13 13 0 0 0 70 0 32000000 1
+#dpi_timings=640 1 100 100 100 480 1 13 13 13 0 0 0 65 0 31800000 1
+#dpi_timings=640 1 130 130 130 480 1 13 13 13 0 0 0 60 0 32000000 1
+#dpi_timings=640 1 56 4 42 480 1 16 4 12 0 0 0 60 0 22800000 1			#alternate 60hz setting for Pi4 only.
+enable_dpi_lcd=1
+
+##Auto detect HDMI
+[edid=*]
+enable_dpi_lcd=0

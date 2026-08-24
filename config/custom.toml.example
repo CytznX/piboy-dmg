@@ -1,0 +1,35 @@
+# Raspberry Pi Imager customisation file.
+#
+# NOTE: on Trixie this is IGNORED - Raspberry Pi OS moved to cloud-init NoCloud.
+# It is kept here because that change is not obvious and cost real time: the
+# file is written, the Pi boots, and nothing in it is applied. See the build
+# document, "Trixie dropped custom.toml for cloud-init".
+#
+# Copy to custom.toml and fill in. custom.toml is gitignored: it holds a wifi
+# PSK in cleartext and a password hash, and neither belongs in a repository.
+config_version = 1
+
+[system]
+hostname = "piboy64"
+
+[user]
+name = "pi"
+# mkpasswd --method=SHA-512
+password = "REPLACE_WITH_YOUR_OWN_HASH"
+password_encrypted = true
+
+[ssh]
+enabled = true
+password_authentication = false        # prefer keys
+authorized_keys = [ "ssh-ed25519 AAAA... you@example.com" ]
+
+[wlan]
+ssid = "YOUR_SSID"
+password = "YOUR_PSK"
+password_encrypted = false
+hidden = false
+country = "GB"                         # affects which channels/power are legal
+
+[locale]
+keymap = "us"
+timezone = "Etc/UTC"

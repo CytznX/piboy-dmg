@@ -1,0 +1,19 @@
+--- joy2key.orig-backup	2026-08-23 21:23:56.734505030 +0100
++++ joy2key	2026-08-23 21:38:08.227469455 +0100
+@@ -13,7 +13,7 @@
+     # * cursor keys for axis/dpad
+     # * enter, space, esc and tab for buttons 'a', 'b', 'x' and 'y'
+     # * page up/page down for buttons 5,6 (shoulder buttons)
+-    params=(kcub1 kcuf1 kcuu1 kcud1 0x0a 0x20 0x1b 0x09 kpp knp)
++    params=(kcub1 kcuf1 kcuu1 kcud1 0x0a 0x1b 0x20 0x09 kpp knp)
+ fi
+ 
+ script="joy2key_sdl.py"
+
+# Why: RetroPie's default joy2key mapping sends Space for button 1 and Esc for
+# button 2, so on a Game Boy style layout 'B' does not cancel - 'X' does.
+# Swapping the two codes makes A=OK (Enter) and B=Cancel (Esc).
+#
+# NOTE: /opt/retropie/admin/joy2key/joy2key is installed by RetroPie-Setup.
+# Reinstalling the joy2key package reverts this. Re-apply with:
+#   sudo patch -p0 -d /opt/retropie/admin/joy2key < joy2key-b-cancels.patch
