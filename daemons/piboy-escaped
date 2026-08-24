@@ -25,7 +25,9 @@ Deliberately narrow, so it can never interfere with normal play:
     to save and restore the terminal
 
 Watches evdev codes rather than joystick button indices, so it works for the
-PiBoy pad and a plugged-in USB pad without per-device configuration.
+PiBoy pad and a plugged-in USB pad without per-device configuration, and picks
+up hotplugged pads (notably Bluetooth, which reconnects long after boot) via
+inotify rather than a rescan timer.
 """
 import ctypes, fcntl, os, glob, select, signal, struct, sys, time
 
@@ -155,17 +157,67 @@ def filter_to_buttons(fd):
         return False
 
 
-def open_pads():
-    fds, masked = {}, 0
-    for path in sorted(glob.glob('/dev/input/event*')):
+# A pad that appears after startup has to be picked up, and Bluetooth is the
+# case that forces the issue: it reconnects asynchronously and slowly, so on
+# most boots a paired controller lands well after this daemon has already
+# scanned /dev/input. inotify rather than a rescan timer, because the whole
+# point of the EVIOCSMASK filtering above is that an idle daemon costs zero
+# wakeups, and a polling rescan would hand that straight back.
+IN_ATTRIB = 0x00000004      # udev chowns the node to root:input AFTER creating
+IN_CREATE = 0x00000100      # it. This daemon runs as the console user, so on
+IN_DELETE = 0x00000200      # IN_CREATE alone the open() still loses the race.
+RETRY_MAX = 5               # bounded retries for that window, ~1s apart
+
+
+def inotify_watch(path='/dev/input'):
+    """Non-blocking inotify fd watching `path`, or None if unavailable."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.inotify_init1.argtypes = [ctypes.c_int]
+        libc.inotify_init1.restype = ctypes.c_int
+        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        libc.inotify_add_watch.restype = ctypes.c_int
+        fd = libc.inotify_init1(os.O_NONBLOCK)
+        if fd < 0:
+            return None
+        if libc.inotify_add_watch(fd, path.encode(), IN_CREATE | IN_DELETE | IN_ATTRIB) < 0:
+            os.close(fd)
+            return None
+        return fd
+    except (OSError, AttributeError):
+        return None
+
+
+def sync_pads(fds, held):
+    """Reconcile `fds` with /dev/input as it is now -> (added, removed, failed, masked).
+
+    Incremental on purpose. Closing and reopening everything would discard
+    `held`, and any device whose buttons happened to be down at that moment
+    would latch its state: `since` never resets, `armed` never returns, and the
+    hatch is dead for the process lifetime.
+    """
+    current = set(glob.glob('/dev/input/event*'))
+    added = failed = masked = removed = 0
+
+    for path in sorted(current - set(fds.values())):
         try:
             fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
         except OSError:
+            failed += 1                    # typically udev has not chowned it yet
             continue
         if filter_to_buttons(fd):
             masked += 1
         fds[fd] = path
-    return fds, masked
+        added += 1
+
+    for fd, path in list(fds.items()):
+        if path not in current:
+            os.close(fd)
+            fds.pop(fd, None)
+            held.pop(fd, None)             # stale button state must not outlive its fd
+            removed += 1
+
+    return added, removed, failed, masked
 
 def main():
     running = True
@@ -188,13 +240,21 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    fds, masked = open_pads()
+    held = {}                                   # fd -> set of codes currently down
+    fds = {}
+    _, _, _, masked = sync_pads(fds, held)
     log(f"watching {len(fds)} input devices ({masked} kernel-filtered to Start/Select); "
         f"{HOLD:.0f}s to escape, {HOLD_FORCE:.0f}s to force")
-    held = {}                                   # fd -> set of codes currently down
+
+    ino = inotify_watch()
+    if ino is None:
+        log("inotify unavailable - a pad that connects later will not be watched")
+
     armed = True                                # require release before re-firing
     since = None                                # when the combo became complete
     next_try = 0.0                              # backoff for declined soft escapes
+    retry_at = 0.0                              # re-open window for the udev chown race
+    retries = 0
 
     while running:
         # Block indefinitely when no combo is in progress: the 0.25s poll only
@@ -204,15 +264,42 @@ def main():
         # which an on-demand daemon started from runcommand hooks cannot promise.
         # Never block indefinitely with no devices open - that would be a
         # permanently dead daemon with no path to recovery.
-        timeout = 0.25 if since is not None else (None if fds else 2.0)
+        if since is not None:
+            timeout = 0.25                 # timing a hold
+        elif retry_at:
+            timeout = max(0.05, retry_at - time.time())
+        elif fds or ino is not None:
+            timeout = None                 # an event or inotify will wake us
+        else:
+            timeout = 2.0                  # nothing to sleep on; never block forever
+
+        watch = list(fds) + [wake_r] + ([ino] if ino is not None else [])
         try:
-            ready, _, _ = select.select(list(fds) + [wake_r], [], [], timeout)
+            ready, _, _ = select.select(watch, [], [], timeout)
         except (select.error, OSError):
             for fd in list(fds):
                 os.close(fd)
                 held.pop(fd, None)         # stale button state must not outlive its fd
-            fds, _ = open_pads()
+            fds.clear()
+            sync_pads(fds, held)
             continue
+
+        if ino is not None and ino in ready:
+            try: os.read(ino, 4096)        # drain; which file changed does not matter
+            except OSError: pass
+            ready = [f for f in ready if f != ino]
+            a, r, failed, m = sync_pads(fds, held)
+            if a or r:
+                log(f"input devices changed (+{a} -{r}); watching {len(fds)} ({m} newly filtered)")
+            retries = RETRY_MAX if failed else 0
+            retry_at = time.time() + 1.0 if failed else 0.0
+
+        if retry_at and time.time() >= retry_at:
+            a, _, failed, m = sync_pads(fds, held)
+            if a:
+                log(f"picked up {a} device(s) on retry; watching {len(fds)} ({m} newly filtered)")
+            retries -= 1
+            retry_at = time.time() + 1.0 if (failed and retries > 0) else 0.0
 
         if wake_r in ready:
             try: os.read(wake_r, 64)       # drain; the flag is already set
@@ -266,6 +353,8 @@ def main():
 
     for fd in fds:
         os.close(fd)
+    if ino is not None:
+        os.close(ino)
     log("stopped")
 
 if __name__ == '__main__':
