@@ -53,7 +53,7 @@ FILE_RE = re.compile(
 # otherwise yield "Game", a path that does not exist, so the real track goes
 # unprotected and is eligible for deletion. Same class of bug FILE_RE above was
 # already fixed for; it was never applied here.
-GDI_RE  = re.compile(r'^\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"|(.+?))\s+\d+\s*$')
+GDI_RE  = re.compile(r'^\s*\d+\s+\d+\s+\d+\s+\d+\s+(?:"([^"]+)"(?:\s+\d+)?|(.+?)\s+\d+)\s*$')
 
 def references(sheet, ext):
     """Bare filenames this sheet names, or None if they could not be determined.
