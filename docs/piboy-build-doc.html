@@ -736,8 +736,64 @@ awk -F'\t' 'NR==FNR{c[$1]++;next} c[$1]&gt;1' inventory inventory | cut -f2-</co
     <p>The name field is a CRC-16/ARC (reflected, polynomial <code>0xA001</code>, init 0) over the device name. Everything else comes straight from <code>/sys/class/input/inputN/id/</code>.</p>
     <div class="note"><strong>Check the formula against a pad that already works before applying it to one that does not.</strong> The PiBoy's stored GUID is <code>15001176010000000100000000010000</code>; computing <code>CRC-16/ARC("PiBoy DMG Controller")</code> gives <code>0x7611</code>, matching bytes 2–3 exactly, and its bus/vendor/product/version line up with sysfs. Only once that reproduced a known-good value was it worth generating <code>030005ff6d0400001dc2000014400000</code> for the F310 — which EmulationStation then accepted, logging <code>Added known joystick 'Logitech Gamepad F310'</code>. Without that check the honest move is the built-in input wizard.</div>
     <p>Note that running that wizard also regenerates the RetroArch profile from the ES configuration, overwriting a hand-written one. That is usually what you want; just do not be surprised by it.</p>
+
+    <h3>Three stacked blockers before a Bluetooth pad will pair</h3>
+    <p>None of them reports anything useful, and each conceals the next:</p>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td><code>hci0</code> will not come up</td><td>soft rfkill block</td><td><code>echo 0 &gt; /sys/class/rfkill/rfkillN/soft</code></td></tr>
+          <tr><td>connects, then drops</td><td>ERTM enabled</td><td><code>options bluetooth disable_ertm=1</code></td></tr>
+          <tr><td><code>le-connection-abort-by-local</code></td><td>BlueZ repair policy</td><td><code>JustWorksRepairing = always</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note warn"><strong>Do not reach for <code>ControllerMode = bredr</code>.</strong> It is the standard advice for Xbox pads and it is wrong here: the Elite advertises over BLE, so forcing BR/EDR leaves the adapter unable to <em>discover</em> it at all. <code>dual</code> is required. The rfkill unblock does persist across reboots via systemd-rfkill &mdash; verify that rather than assume it.</div>
+
+    <h3>The kernel delivers perfect input that SDL refuses to see</h3>
+    <p>udev's <code>input_id</code> classifier tags the pad <code>ID_INPUT_KEYBOARD</code> &mdash; its Bluetooth HID descriptor carries a keyboard collection for the Xbox and Share buttons &mdash; and never sets <code>ID_INPUT_JOYSTICK</code>. SDL2's udev backend enumerates only devices carrying that tag, so EmulationStation and RetroArch cannot see the pad at all while the kernel delivers flawless <code>BTN_GAMEPAD</code> and <code>EV_ABS</code> events. Over USB the descriptor is clean and it works, which produces the diagnostic headline: <em>the controller only works when plugged in</em>.</p>
+    <div class="note"><strong>Prove the kernel side before touching userspace.</strong> Reading <code>/dev/input/eventN</code> directly for 30 s while mashing buttons settles it in one step &mdash; 113 key events and 1739 axis events with correct codes means the fault is enumeration, not hardware. A rule scoped to bus and vendor plus <em>either</em> the device name or the product id corrects the single bad verdict without reimplementing the classifier. Match on the name as well as the id: Xbox pads change product id across firmware revisions.</div>
+
+    <h3>One Elite is two devices</h3>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Link</th><th>evdev name</th><th class="num">VID:PID</th><th class="num">select / start</th><th class="num">right stick</th></tr></thead>
+        <tbody>
+          <tr><td>Bluetooth</td><td><code>Xbox Wireless Controller</code></td><td class="num">045e:0b22</td><td class="num">10 / 11</td><td class="num">axes 2/3</td></tr>
+          <tr><td>USB</td><td><code>Microsoft X-Box One Elite 2 pad</code></td><td class="num">045e:0b00</td><td class="num">6 / 7</td><td class="num">axes 3/4</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Different name, different id, different button numbering. Each link needs its own autoconfig profile; a copy of one will not drive the other. EmulationStation stores both correctly &mdash; two <code>es_input.cfg</code> entries differing in the GUID's leading bus field &mdash; but generates a single RetroArch profile named after whichever it configured last, leaving the other pad to match by vendor and product id, or not at all.</p>
+    <div class="note warn"><strong>An unconfigured pad still occupies a udev slot.</strong> Matching nothing by name or id, the USB pad logged <code>not configured</code>, claimed no port, and pushed the built-in controls from port 1 to port 2 &mdash; leaving player 1 bound to nothing while every button on the device still worked perfectly. Every game ignored every input, which is indistinguishable from failed hardware. The <code>[Autoconf]</code> lines of a verbose log name each pad and the port it landed in, and are the fastest way to see it.</div>
+    <div class="note"><strong>Never pin <code>input_player1_joypad_index</code> to work around that.</strong> Indices are positional, not device-bound. The moment the extra pad sleeps or drifts out of range, port 1 points at a device that does not exist and the built-in controls go dead &mdash; recreating the exact failure the pin was meant to cure.</div>
   </section>
 
+
+  <section>
+    <div class="eyebrow">Measured</div>
+    <h2>The emulators were never slow</h2>
+    <p>N64 and PlayStation both felt like they ran at 80&ndash;90&#37; of real time &mdash; smoothly, with no dropped frames. Overclock headroom, fan curves and core options are all the wrong place to look. Measure before changing anything.</p>
+
+    <h3>Time the slope, not the run</h3>
+    <p><code>--max-frames</code> makes throughput measurable, but any single timing carries about a second of startup and biases the result low. Two runs cancel it:</p>
+<pre><code>t600  = time(retroarch --max-frames=600  &hellip;)
+t1800 = time(retroarch --max-frames=1800 &hellip;)
+fps   = 1200 / (t1800 &minus; t600)</code></pre>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Core</th><th class="num">As configured</th><th class="num">Unthrottled ceiling</th></tr></thead>
+        <tbody>
+          <tr><td>pcsx-rearmed (PSX)</td><td class="num">100.6&#37;</td><td class="num">539&#37;</td></tr>
+          <tr><td>mupen64plus-next (N64)</td><td class="num">97.9&#37;</td><td class="num">262&#37;</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Both already run at full speed, with two to five times the headroom they need. The perceived slowness was display cadence alone. Setting <code>video_refresh_rate</code> to the true 70.06 Hz changed nothing measurable (100.5&#37;), because audio sync was pacing correctly all along; only changing the panel fixed the feel.</p>
+    <div class="note"><strong>Eliminate the cheap explanation first.</strong> PAL releases genuinely run at 50/60 = 83.3&#37; of NTSC speed, which matches &ldquo;80&ndash;90&#37;&rdquo; exactly. One pass over the region tags ruled it out: PSX is 160/160 USA, N64 351 USA against 24 PAL.</div>
+    <div class="note warn"><strong>A null video driver cannot benchmark N64.</strong> mupen64plus requires hardware rendering, so RetroArch overrides <code>video_driver = "null"</code> with GL and then dies on KMS if EmulationStation holds the display.</div>
+  </section>
 
   <section>
     <div class="eyebrow">Measured</div>
@@ -805,6 +861,12 @@ else                                   val-&gt;intval = POWER_SUPPLY_STATUS_CHAR
     <p>RetroArch exits on Start+Select. Emulators launched with the <code>CON:</code> prefix — <code>frotz</code> and anything else console-based — never see a RetroArch hotkey, so on a device with no keyboard attached the only remaining exit is cutting power. On hardware where every unclean shutdown risks the filesystem, that is the one exit path worth engineering away.</p>
     <div class="note warn"><strong>A universal escape hatch collides with normal play unless it is held.</strong> The obvious implementation — watch for both buttons, kill the emulator — is wrong, because most <em>ports</em> run standalone rather than under RetroArch, and in Duke Nukem or Quake III Start is an ordinary menu button. An instant trigger kills the game mid-play. Requiring a two-second hold cannot collide with in-game use. Guard it further so it fires only while <code>runcommand.sh</code> is running (never on the ES menu) and only when RetroArch is absent (which keeps its own hotkey). Watch evdev codes rather than joystick indices and it works for every pad without per-device configuration.</div>
 
+    <h3>Restarting EmulationStation over SSH breaks every emulator at once</h3>
+    <p>runcommand launches each emulator as <code>eval "$COMMAND" &lt;/dev/tty</code>. A process with no controlling terminal cannot open <code>/dev/tty</code>, so the command never runs: the console flashes and EmulationStation returns, for every system, with nothing logged anywhere.</p>
+<pre><code>ps -o pid,ppid,tty,cmd -p $(pgrep -f emulationstation)
+  4468   1   ?   /bin/bash /usr/bin/emulationstation      # TT &quot;?&quot; = no terminal</code></pre>
+    <div class="note warn"><strong><code>nohup emulationstation &amp;</code> from an SSH session is the trap.</strong> It reparents to systemd with no TTY, while the autologin shell on tty1 sits idle having lost the process it started. Restore the <em>login</em>, not the program: <code>sudo systemctl restart getty@tty1</code>, then confirm <code>ps -o tty=</code> reports <code>tty1</code> rather than <code>?</code>. Diagnosing this from the emulator side is hopeless &mdash; the identical command launched over SSH succeeds every time, because that session has a terminal.</div>
+
     <h3>The last core installed claims the default</h3>
     <p>Installing <code>lr-fbneo</code> for arcade silently made it the default for <em>NES</em> as well, because it registers an <code>nes</code> subsystem. Every NES game then failed with <code>Romset is Unknown</code> — FBNeo matches by romset name and a file called <code>01. Super Mario Bros. 3 (USA).nes</code> matches nothing. Three other systems had no default at all. Audit after any batch install:</p>
 <pre><code>for s in /opt/retropie/configs/*/; do
@@ -850,6 +912,17 @@ input_player1_btn_b = "8"</code></pre>
 
 <pre><code>od -An -tx4 --endian=big /proc/device-tree/panel/*bus*format*
 cat /sys/class/drm/card0-DPI-1/modes</code></pre>
+
+    <h3>70 Hz is a choice, and on a Pi 4 it is the wrong one</h3>
+    <p>The timings above are Experimental Pi's shipped default, and they yield <strong>70.06 Hz</strong> &mdash; <code>32000000 / (880 &times; 519)</code>. That is not an artefact of the port. Their config carries a commented menu of alternatives from 60 to 85 Hz and annotates one line <code>#alternate 60hz setting for Pi4 only</code>. On this board that line is their own recommendation, validated on this panel, and preferable to a pixel clock derived from first principles:</p>
+<pre><code>dpi_timings=640 1 56 4 42 480 1 16 4 12 0 0 0 60 0 22800000 1
+        &darr;
+dtparam=clock-frequency=22800000
+dtparam=hactive=640,hfp=56,hsync=4,hbp=42
+dtparam=vactive=480,vfp=16,vsync=4,vbp=12</code></pre>
+    <p>742 &times; 512 at 22.8 MHz is 60.0152 Hz. Confirm it in a verbose RetroArch log rather than <code>modes</code>, which reports resolution only:</p>
+<pre><code>[DRM]: Mode 0: (640x480) 640 x 480, 60.015163 Hz</code></pre>
+    <div class="note warn"><strong>A non-integer refresh ratio reads as slowness, not as stutter.</strong> At 70.06 Hz against 60 fps content, about ten frames per second are displayed twice: most last 14.3 ms, ten last 28.6 ms. Nothing is dropped &mdash; so it does not look like dropped frames &mdash; but continuous-motion games feel heavy, and the natural way to describe that is &ldquo;running at 80&ndash;90&#37; speed&rdquo;. Profiling the emulator will never find it, because the emulator is not the problem.</div>
 
     <h3>Pin budget</h3>
     <div class="tscroll">
