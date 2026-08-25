@@ -1,0 +1,80 @@
+# For more options and information see
+# http://rptl.io/configtxt
+# Some settings may impact device functionality. See link above for details
+
+# Uncomment some or all of these to enable the optional hardware interfaces
+#dtparam=i2c_arm=on
+#dtparam=i2s=on
+#dtparam=spi=on
+
+# Enable audio (loads snd_bcm2835)
+dtparam=audio=on
+
+# Additional overlays and parameters are documented
+# /boot/firmware/overlays/README
+
+# Automatically load overlays for detected cameras
+camera_auto_detect=1
+
+# Automatically load overlays for detected DSI displays
+display_auto_detect=1
+
+# Automatically load initramfs files, if found
+auto_initramfs=1
+
+# Enable DRM VC4 V3D driver
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+
+# Don't have the firmware create an initial video= setting in cmdline.txt.
+# Use the kernel's default instead.
+disable_fw_kms_setup=1
+
+# Run in 64-bit mode
+arm_64bit=1
+
+# Disable compensation for displays with overscan
+disable_overscan=1
+
+# Run as fast as firmware / board allows
+arm_boost=1
+
+[cm4]
+# Enable host mode on the 2711 built-in XHCI USB controller.
+# This line should be removed if the legacy DWC2 controller is required
+# (e.g. for USB device mode) or if USB support is not required.
+otg_mode=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+
+[pi5]
+dtoverlay=nospi10
+
+[all]
+
+# --- PiBoy DMG 3.5in DPI panel (translated from vendor fkms config) ---
+
+# --- PiBoy DMG PWM audio on GPIO 18/19 (vendor config) ---
+audio_pwm_mode=2
+dtoverlay=audremap,pins_18_19
+
+# --- PiBoy DMG 3.5in DPI panel (split: config.txt truncates at 98 chars) ---
+dtoverlay=vc4-kms-dpi-generic
+dtparam=clock-frequency=22800000
+dtparam=hactive=640,hfp=56,hsync=4,hbp=42
+dtparam=vactive=480,vfp=16,vsync=4,vbp=12
+dtparam=rgb666-padhi
+dtparam=width-mm=71,height-mm=53
+
+# --- Experimental Pi setting: suppress undervoltage throttling (XPi boost rail dips under load) ---
+avoid_warnings=2
+
+# --- vendor clock settings (PiBoy DMG shipped these; stock Trixie is 1800/0) ---
+# Measured on this hardware at 2GHz: reaches the 80C soft limit under sustained
+# 4-core load with the fan at 100%, trimming to ~1926-1975MHz. Never hard-throttles
+# and core voltage holds steady. Watch get_throttled after enabling.
+arm_freq=2000
+over_voltage=6
+v3d_freq=750
+initial_turbo=60
