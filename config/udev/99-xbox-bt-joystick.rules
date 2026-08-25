@@ -1,4 +1,4 @@
-# Xbox Wireless Controller / Elite Series 2 over Bluetooth (045e:0b22, bus 0005).
+# Xbox Wireless Controller / Elite Series 2 over Bluetooth.
 #
 # The Bluetooth HID descriptor includes a keyboard collection for the Xbox and
 # Share buttons, so udev's input_id classifier tags the pad ID_INPUT_KEYBOARD
@@ -6,9 +6,23 @@
 # carrying that tag, so EmulationStation and RetroArch cannot see the pad at all
 # - while the kernel is delivering perfectly good BTN_GAMEPAD/EV_ABS events.
 # Over USB the descriptor is clean, it is classified correctly, and it works;
-# hence "only works when plugged in".
+# hence the symptom "only works when plugged in".
 #
-# Scoped to this exact bustype/vendor/product so nothing else is affected.
+# Must sort after 60-input-id.rules, which is what sets the tag being corrected.
+#
+# Two matches, deliberately. Xbox pads change product ID across firmware
+# revisions (the One S 02e0 -> 02fd transition is the documented case), so
+# pinning a PID means a routine firmware update silently un-fixes this with
+# nothing in any log pointing here. Matching the name survives that. Keeping
+# the PID match too means a name change does not un-fix it either. Both stay
+# narrow: bus 0005 is Bluetooth and 045e is Microsoft, and no Microsoft
+# keyboard or mouse reports the name below or that product ID.
+
+ACTION=="add|change", SUBSYSTEM=="input", \
+  ATTRS{id/bustype}=="0005", ATTRS{id/vendor}=="045e", \
+  ATTRS{name}=="Xbox Wireless Controller", \
+  ENV{ID_INPUT_JOYSTICK}="1"
+
 ACTION=="add|change", SUBSYSTEM=="input", \
   ATTRS{id/bustype}=="0005", ATTRS{id/vendor}=="045e", ATTRS{id/product}=="0b22", \
   ENV{ID_INPUT_JOYSTICK}="1"
