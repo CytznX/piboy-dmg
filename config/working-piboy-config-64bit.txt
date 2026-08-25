@@ -53,9 +53,9 @@ dtoverlay=nospi10
 
 [all]
 
-# --- PiBoy DMG 3.5in DPI panel (translated from vendor fkms config) ---
+# --- PiBoy DMG 3.5in DPI panel (from Experimental Pi fkms config) ---
 
-# --- PiBoy DMG PWM audio on GPIO 18/19 (vendor config) ---
+# --- PiBoy DMG PWM audio on GPIO 18/19 (Experimental Pi) ---
 audio_pwm_mode=2
 dtoverlay=audremap,pins_18_19
 
@@ -67,10 +67,10 @@ dtparam=vactive=480,vfp=16,vsync=4,vbp=12
 dtparam=rgb666-padhi
 dtparam=width-mm=71,height-mm=53
 
-# --- Experimental Pi setting: suppress undervoltage throttling (XPi boost rail dips under load) ---
+# --- Experimental Pi: suppress undervoltage throttling (XPi rail dips) ---
 avoid_warnings=2
 
-# --- vendor clock settings (PiBoy DMG shipped these; stock Trixie is 1800/0) ---
+# --- Experimental Pi clock settings (stock Trixie is 1800/0) ---
 # Measured on this hardware at 2GHz: reaches the 80C soft limit under sustained
 # 4-core load with the fan at 100%, trimming to ~1926-1975MHz. Never hard-throttles
 # and core voltage holds steady. Watch get_throttled after enabling.
