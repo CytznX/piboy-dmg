@@ -785,6 +785,15 @@ else                                   val-&gt;intval = POWER_SUPPLY_STATUS_CHAR
     <h2>The parts that fail silently</h2>
     <p>Every input problem found on this build shared a shape: nothing logged, nothing errored, the control simply did nothing. Collected here because the symptom gives no clue which layer is at fault.</p>
 
+    <h3>A dead controller that is really a restored savestate</h3>
+    <p>Donkey Kong 64 began launching mid-session and accepting no input — not from the built-in pad, not from a Bluetooth controller. That is the exact signature of dead input hardware, and neither was at fault. RetroArch was restoring a <code>.state.auto</code> that had been written while the game was <em>already</em> wedged, so every launch faithfully reproduced a hung session.</p>
+    <p>The two settings responsible belong to neither RetroPie nor Experimental Pi. RetroArch's own skeleton documents the default, and with auto-save off no <code>.state.auto</code> is ever written, so auto-load has nothing to restore and the failure cannot occur:</p>
+<pre><code># RetroArch's documented defaults
+# savestate_auto_save = false
+# savestate_auto_load = true</code></pre>
+    <div class="note warn"><strong>Enabling auto-save makes one bad session permanent.</strong> A state is written on <em>every</em> exit, including exits from a game that had already hung, and auto-load then restores it on every launch thereafter. The symptom is indistinguishable from broken input, which sends you hunting the controller, the driver and the pairing before the emulator. Recovery is deleting <code>&lt;rom&gt;.state.auto</code> beside the ROM. Never delete <code>.srm</code> — that is the real in-game battery save and is unrelated.</div>
+    <p>When a setting has no obvious author, date it rather than assume it. Timestamped copies of <code>retroarch.cfg</code> placed these two lines in a specific window, and they sat <em>above</em> the file's own <code>## Skeleton config file for RetroArch</code> header, which marks them as prepended rather than native. <code>grep -rn savestate_auto</code> across <code>RetroPie-Setup/scriptmodules</code> and every shipped <code>retroarch.cfg.rp-dist</code> returned nothing, ruling out both RetroPie and the original image — which left this build's own history as the source.</p>
+
     <h3>The launch menu ignores the gamepad — joy2key was never installed</h3>
     <p>RetroPie's runcommand menu is a <code>dialog</code> box that reads only the keyboard. A helper called joy2key bridges the pad to it, and <code>runcommand.sh</code> gives up without a word when it is missing:</p>
 <pre><code>function start_joy2key() {
