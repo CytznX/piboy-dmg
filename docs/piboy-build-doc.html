@@ -431,7 +431,7 @@ SystemMaxUse=64M</code></pre>
 
       <div class="trap">
         <h3>config.txt silently truncates lines at 98 characters</h3>
-        <p>No warning, no log entry. A long <code>dtoverlay=</code> line simply loses its tail. Ours was 162 characters, so <code>vactive=480</code> arrived as <code>vactive=4</code> and the panel ran at <strong>640×4</strong> — a lit backlight showing essentially nothing. The dropped <code>rgb666-padhi</code> then caused trap three.</p>
+        <p>No warning, no log entry. A long <code>dtoverlay=</code> line simply loses its tail. Ours was 162 characters, so <code>vactive=480</code> arrived as <code>vactive=4</code> and the panel ran at <strong>640×4</strong> — a lit backlight showing essentially nothing. The dropped <code>rgb666-padhi</code> then caused the GPIO 18 collision below.</p>
         <p>Split long overlays across <code>dtparam=</code> lines, which bind to the preceding <code>dtoverlay=</code>. Verify what actually landed by reading the live device tree, never by reading config.txt back.</p>
       </div>
 
@@ -464,7 +464,9 @@ SystemMaxUse=64M</code></pre>
         <p>Mapping the hardware wheel 1:1 onto <code>amixer</code> percentage feels broken — audible only above roughly 30% of travel. The control spans <strong>−102.39 dB to +4.00 dB</strong> and percentage is linear in dB, so 30% lands at −70 dB. Measured on this hardware:</p>
 <pre><code> 30% -> -70.47dB     60% -> -38.56dB
  80% -> -17.28dB    100% -> +4.00dB</code></pre>
-        <p>Map the wheel onto the usable top of the range instead (0 = true mute, 1–100 → ~55–100%). Both the wheel and the driver report correctly throughout; it is only the mapping between them that has to be built.</p>
+        <p>A curve is the answer, and Experimental Pi already had one. Their <code>osd</code> binary shells out to <code>amixer -q sset 'PCM' %d%%</code> with the value built from literal-pool constants 9.0, 100.0 and 1.0 and a <code>log10</code> call:</p>
+<pre><code>percent = (int)(100 * log10(wheel * 9/100 + 1))</code></pre>
+        <p>An identity at both ends &mdash; <code>log10(1)=0</code>, <code>log10(10)=1</code> &mdash; bowing upward between them, so wheel 25 lands at 51% and wheel 50 at 74%. Keep a true mute at the bottom, which theirs never had: their curve reaches 0% at wheel 0 on its own, but 0% on this control is &minus;102.39 dB, which is not silence. Mute a little <em>above</em> zero and flip the element's playback switch &mdash; the wheel reports <code>fuzz=5</code>, so a 1&nbsp;&rarr;&nbsp;0 step is dropped and the wheel can rest at 1 or 2. Both the wheel and the driver report correctly throughout; it is only the mapping between them that has to be built.</p>
       </div>
 
       <div class="trap">
@@ -513,7 +515,7 @@ wifis:
 
       <li>
         <h3>Enable the DPI panel</h3>
-        <p>Split across short lines — see trap one. Keep HDMI enabled while working; a second display is what lets you debug the first.</p>
+        <p>Split across short lines — see the <code>config.txt</code> truncation trap. Keep HDMI enabled while working; a second display is what lets you debug the first.</p>
 <pre><code>dtoverlay=vc4-kms-dpi-generic
 dtparam=clock-frequency=32000000
 dtparam=hactive=640,hfp=80,hsync=80,hbp=80
@@ -531,7 +533,7 @@ dtoverlay=audremap,pins_18_19</code></pre>
 
       <li>
         <h3>Restore the clock</h3>
-        <p>One line, and the difference between a 600 MHz handheld and an 1800 MHz one. See trap one for what it actually does and what you are trading away.</p>
+        <p>One line, and the difference between a 600 MHz handheld and an 1800 MHz one. See the under-voltage trap for what it actually does and what you are trading away.</p>
 <pre><code>avoid_warnings=2</code></pre>
         <p>Verify by timing real work rather than reading a clock value:</p>
 <pre><code>vcgencmd get_throttled           <span class="c"># want 0x0</span>
@@ -564,7 +566,7 @@ echo xpi_gamecon | sudo tee /etc/modules-load.d/xpi_gamecon.conf</code></pre>
 
       <li>
         <h3>Replace the fan controller</h3>
-        <p>Experimental Pi's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see the closing section. Until something replaces it the fan is unmanaged, so do this before any sustained load. The daemon below reproduces Experimental Pi's <code>osd.cfg</code> bands and adds a full-speed band above 78 °C that the original lacked.</p>
+        <p>Experimental Pi's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see <em>What the port taught</em>. Until something replaces it the fan is unmanaged, so do this before any sustained load. The daemon below reproduces Experimental Pi's <code>osd.cfg</code> bands and adds a full-speed band above 78 °C that the original lacked.</p>
 <pre><code>duty_for() {   <span class="c"># millidegrees -&gt; 0..255 PWM</span>
     local t=$1
     if   [ "$t" -ge 78000 ]; then echo 255   <span class="c"># 100%  (added)</span>
@@ -768,32 +770,12 @@ awk -F'\t' 'NR==FNR{c[$1]++;next} c[$1]&gt;1' inventory inventory | cut -f2-</co
     <p>Different name, different id, different button numbering. Each link needs its own autoconfig profile; a copy of one will not drive the other. EmulationStation stores both correctly &mdash; two <code>es_input.cfg</code> entries differing in the GUID's leading bus field &mdash; but generates a single RetroArch profile named after whichever it configured last, leaving the other pad to match by vendor and product id, or not at all.</p>
     <div class="note warn"><strong>An unconfigured pad still occupies a udev slot.</strong> Matching nothing by name or id, the USB pad logged <code>not configured</code>, claimed no port, and pushed the built-in controls from port 1 to port 2 &mdash; leaving player 1 bound to nothing while every button on the device still worked perfectly. Every game ignored every input, which is indistinguishable from failed hardware. The <code>[Autoconf]</code> lines of a verbose log name each pad and the port it landed in, and are the fastest way to see it.</div>
     <div class="note"><strong>Never pin <code>input_player1_joypad_index</code> to work around that.</strong> Indices are positional, not device-bound. The moment the extra pad sleeps or drifts out of range, port 1 points at a device that does not exist and the built-in controls go dead &mdash; recreating the exact failure the pin was meant to cure.</div>
+    <h3>Plugging in USB changes who player 1 is</h3>
+    <p>With correct autoconfig profiles for both of the Elite's identities nothing is ever dead &mdash; but the USB pad sorts ahead of the built-in controls in libudev order, so attaching the cable moves the Elite to port 1 and the PiBoy's own buttons to port 2. Connecting a controller merely to charge it mid-game therefore shifts control.</p>
+    <p>The obvious remedy, pinning <code>input_player1_joypad_index</code>, is worse than the problem: indices are positional, so the pin addresses nothing the moment that pad disappears and the built-in controls go dead. RetroArch offers no name-based port binding. The practical options are charging from a source other than the Pi, or swapping the device index for the session from the in-game menu. Left unresolved deliberately &mdash; a dynamic assignment that is occasionally surprising beats a static one that is occasionally fatal.</p>
+
   </section>
 
-
-  <section>
-    <div class="eyebrow">Measured</div>
-    <h2>The emulators were never slow</h2>
-    <p>N64 and PlayStation both felt like they ran at 80&ndash;90&#37; of real time &mdash; smoothly, with no dropped frames. Overclock headroom, fan curves and core options are all the wrong place to look. Measure before changing anything.</p>
-
-    <h3>Time the slope, not the run</h3>
-    <p><code>--max-frames</code> makes throughput measurable, but any single timing carries about a second of startup and biases the result low. Two runs cancel it:</p>
-<pre><code>t600  = time(retroarch --max-frames=600  &hellip;)
-t1800 = time(retroarch --max-frames=1800 &hellip;)
-fps   = 1200 / (t1800 &minus; t600)</code></pre>
-    <div class="tscroll">
-      <table>
-        <thead><tr><th>Core</th><th class="num">As configured</th><th class="num">Unthrottled ceiling</th></tr></thead>
-        <tbody>
-          <tr><td>pcsx-rearmed (PSX)</td><td class="num">100.6&#37;</td><td class="num">539&#37;</td></tr>
-          <tr><td>mupen64plus-next (N64)</td><td class="num">97.9&#37;</td><td class="num">262&#37;</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p>Both already run at full speed, with two to five times the headroom they need. The perceived slowness was display cadence alone. Setting <code>video_refresh_rate</code> to the true 70.06 Hz changed nothing measurable (100.5&#37;), because audio sync was pacing correctly all along; only changing the panel fixed the feel.</p>
-    <div class="note"><strong>Eliminate the cheap explanation first.</strong> PAL releases genuinely run at 50/60 = 83.3&#37; of NTSC speed, which matches &ldquo;80&ndash;90&#37;&rdquo; exactly. One pass over the region tags ruled it out: PSX is 160/160 USA, N64 351 USA against 24 PAL.</div>
-    <div class="note warn"><strong>A null video driver cannot benchmark N64.</strong> mupen64plus requires hardware rendering, so RetroArch overrides <code>video_driver = "null"</code> with GL and then dies on KMS if EmulationStation holds the display.</div>
-  </section>
 
   <section>
     <div class="eyebrow">Measured</div>
@@ -890,7 +872,7 @@ input_player1_btn_b = "8"</code></pre>
   </section>
   <section>
     <div class="eyebrow">Reference</div>
-    <h2>Translating Experimental Pi's display config</h2>
+    <h2>The display: translating the config, and the cadence trap</h2>
     <p>The original ran legacy fkms, where timings were a firmware-parsed string. Under full KMS the same numbers become device-tree properties. This mapping is the core of the port.</p>
 
     <div class="tscroll">
@@ -914,6 +896,27 @@ input_player1_btn_b = "8"</code></pre>
 <pre><code>od -An -tx4 --endian=big /proc/device-tree/panel/*bus*format*
 cat /sys/class/drm/card0-DPI-1/modes</code></pre>
 
+    <h3>The emulators were never slow</h3>
+
+    <p>N64 and PlayStation both felt like they ran at 80&ndash;90&#37; of real time &mdash; smoothly, with no dropped frames. Overclock headroom, fan curves and core options are all the wrong place to look. Measure before changing anything.</p>
+
+    <h3>Time the slope, not the run</h3>
+    <p><code>--max-frames</code> makes throughput measurable, but any single timing carries about a second of startup and biases the result low. Two runs cancel it:</p>
+<pre><code>t600  = time(retroarch --max-frames=600  &hellip;)
+t1800 = time(retroarch --max-frames=1800 &hellip;)
+fps   = 1200 / (t1800 &minus; t600)</code></pre>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Core</th><th class="num">As configured</th><th class="num">Unthrottled ceiling</th></tr></thead>
+        <tbody>
+          <tr><td>pcsx-rearmed (PSX)</td><td class="num">100.6&#37;</td><td class="num">539&#37;</td></tr>
+          <tr><td>mupen64plus-next (N64)</td><td class="num">97.9&#37;</td><td class="num">262&#37;</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Both already run at full speed, with two to five times the headroom they need. The perceived slowness was display cadence alone. Setting <code>video_refresh_rate</code> to the true 70.06 Hz changed nothing measurable (100.5&#37;), because audio sync was pacing correctly all along; only changing the panel fixed the feel.</p>
+    <div class="note"><strong>Eliminate the cheap explanation first.</strong> PAL releases genuinely run at 50/60 = 83.3&#37; of NTSC speed, which matches &ldquo;80&ndash;90&#37;&rdquo; exactly. One pass over the region tags ruled it out: PSX is 160/160 USA, N64 351 USA against 24 PAL.</div>
+    <div class="note warn"><strong>A null video driver cannot benchmark N64.</strong> mupen64plus requires hardware rendering, so RetroArch overrides <code>video_driver = "null"</code> with GL and then dies on KMS if EmulationStation holds the display.</div>
     <h3>70 Hz is a choice, and on a Pi 4 it is the wrong one</h3>
     <p>The timings above are Experimental Pi's shipped default, and they yield <strong>70.06 Hz</strong> &mdash; <code>32000000 / (880 &times; 519)</code>. That is not an artefact of the port. Their config carries a commented menu of alternatives from 60 to 85 Hz and annotates one line <code>#alternate 60hz setting for Pi4 only</code>. On this board that line is their own recommendation, validated on this panel, and preferable to a pixel clock derived from first principles:</p>
 <pre><code>dpi_timings=640 1 56 4 42 480 1 16 4 12 0 0 0 60 0 22800000 1
@@ -937,10 +940,8 @@ dtparam=vactive=480,vfp=16,vsync=4,vbp=12</code></pre>
       </table>
     </div>
     <p>The controller sits outside the DPI range entirely, so enabling the panel never disturbs it.</p>
-  </section>
+    <h3>What the driver exposes</h3>
 
-  <section>
-    <h2>What the driver exposes</h2>
     <p>Once loaded, <code>/sys/kernel/xpi_gamecon/</code> carries the board's telemetry and controls. All nodes are <code>0660 root:root</code>. Live, changing values here are also the quickest proof the GPIO protocol is talking.</p>
 
     <div class="tscroll">
@@ -962,29 +963,9 @@ dtparam=vactive=480,vfp=16,vsync=4,vbp=12</code></pre>
   </section>
 
   <section>
-    <h2>Three things that were not bugs</h2>
-    <p>Worth recording, because each looks like an obvious defect and none needs fixing.</p>
-    <p>The driver derives the peripheral base by reading the <code>/soc</code> <code>ranges</code> property by <code>u32</code> index — which ought to break under a 64-bit kernel's two-cell parent addresses. It doesn't. The author wrote a fallback that reads index 1, sees the high word <code>0x00000000</code>, and drops to index 2 for <code>0xfe000000</code>. It resolves correctly on both architectures.</p>
-    <p>Similarly, the panel needed no sync-polarity inversion. Experimental Pi's timings carried <code>h_sync_polarity=1</code> and <code>v_sync_polarity=1</code>, which map onto the overlay's defaults; adding <code>hsync-invert</code>/<code>vsync-invert</code> would have broken a working display.</p>
-
-    <h3>The red LED ignores you, and should</h3>
-    <p>Writes to <code>green</code> work and are true PWM brightness — <code>15</code> is visibly dimmer than <code>100</code>, so pulsing and breathing patterns are available. Writes to <code>red</code> do nothing at any value, alone or combined, even though the element clearly lights on its own. That reads as a broken output. It is not.</p>
-    <p>The driver <em>does</em> transmit the value. The outbound protocol round-robins four settings, one per packet, selected by a high byte:</p>
-<pre><code>data[GC_LENGTH+0] = 0xC0 | (index &amp; 0x3);      <span class="c">// 0xC2 = red, 0xC3 = green</span>
-data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan, red, green</span></code></pre>
-    <p>Red goes out as selector <code>0xC2</code> every fourth packet and the XPi discards it, because that channel is firmware-owned. Experimental Pi documents a single <strong>bi-colour</strong> LED whose red element is a battery gauge: green at 25% or above, then yellow, then a second yellow, then red as the pack drains. It also lights with no battery fitted, and flashes a green-then-red diagnostic when the Pi is not communicating at all — behaviour that cannot involve software running on the Pi.</p>
-    <div class="note"><strong>Green is yours; red is the firmware's.</strong> Register green as a <code>leds</code> classdev and let the kernel animate it. Expose red read-only — a writable node that silently does nothing is worse than no node, and this one consumed two separate investigations. Note also that low-battery indication in a userland daemon duplicates what the firmware already signals on the same LED.</div>
-    <div class="note warn"><strong>A caution on method.</strong> Brief four-to-five second sweeps produced results that contradicted each other and sent us chasing a non-existent brightness-scale bug. Hold each state until it is confirmed by eye. Better still, check whether Experimental Pi documented the behaviour before measuring at all — the answer here sat in a public troubleshooting page the whole time.</div>
-  </section>
-
-  <section>
-    <div class="eyebrow">Open</div>
-    <h2>What is not solved</h2>
-
-    <h3>Plugging in USB changes who player 1 is</h3>
-    <p>With correct autoconfig profiles for both of the Elite's identities nothing is ever dead &mdash; but the USB pad sorts ahead of the built-in controls in libudev order, so attaching the cable moves the Elite to port 1 and the PiBoy's own buttons to port 2. Connecting a controller merely to charge it mid-game therefore shifts control.</p>
-    <p>The obvious remedy, pinning <code>input_player1_joypad_index</code>, is worse than the problem: indices are positional, so the pin addresses nothing the moment that pad disappears and the built-in controls go dead. RetroArch offers no name-based port binding. The practical options are charging from a source other than the Pi, or swapping the device index for the session from the in-game menu. Left unresolved deliberately &mdash; a dynamic assignment that is occasionally surprising beats a static one that is occasionally fatal.</p>
-
+    <div class="eyebrow">Lessons</div>
+    <h2>What the port taught</h2>
+    <p>Five of these started as defects and ended as design decisions; the last three looked like defects and were not. Collected because each one is reusable on any similar device, and several delete userspace code rather than adding it.</p>
     <h3>Replacing Experimental Pi's OSD — mostly a solved problem</h3>
     <p>The <code>osd</code> binary is a 32-bit armhf ELF linking <code>/opt/vc/lib/libbcm_host.so</code>, <code>libvchiq_arm.so</code> and <code>libvcos.so</code> — the legacy Broadcom VideoCore userland. That stack does not exist on 64-bit Raspberry Pi OS, dispmanx does not work under full KMS anyway, and multiarch cannot save it because those libraries were never ported. It will not run again.</p>
     <p>But it turns out it was doing four jobs, and only one of them was graphics:</p>
@@ -1024,14 +1005,6 @@ menu_enable_widgets = "false"
 exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 45%" &gt;&amp;3</code></pre>
     <p>Ownership is split by which daemon owns the event. <code>piboy-vold</code> draws the volume slider, because it is the process holding the wheel's evdev fd; it renders the position as <code>Volume [========--------] 50%</code>. <code>piboy-fand</code> fires the same mechanism when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than Experimental Pi's static meter, which you had to look at.</p>
     <p>For the menu itself, <code>menu_battery_level_enable</code> shows charge in RGUI's top-right — but only alongside <code>menu_timedate_enable</code>, since in RGUI they share one status line. And note RetroPie's EmulationStation has <em>no</em> status display of any kind: no clock, no battery, nothing in the binary to enable.</p>
-
-    <h3>What a real status bar would take</h3>
-    <p>A permanent strip over both the frontend and games means running a Wayland compositor (<code>labwc</code>, <code>cage</code>) as DRM master, with ES and RetroArch as clients and a layer-shell bar (<code>waybar</code>, <code>yambar</code>) above them. That is the honest modern equivalent of dispmanx. The blocker is that RetroPie builds RetroArch <strong>without</strong> Wayland:</p>
-<pre><code>retroarch --features
-  Wayland  - Wayland input/video drivers: no
-  KMS      - Video context driver: yes</code></pre>
-    <p>So it is a compositor install, a full RetroArch rebuild from source with Wayland enabled, reworked input routing, and a compositing cost on a 640×480 panel where a 20 px bar is 4% of the screen. Treat it as its own project, with a working image backed up first.</p>
-    <p><strong>Back up the binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
 
     <h3>Measured: leave the bit-bang clock alone</h3>
     <p>The driver busy-spins in <code>udelay()</code> to clock its 2-wire protocol, and the half-period is a compile-time constant. Arithmetic suggests it costs a fifth of a core permanently, which makes lowering it look like the biggest available win. Make it a writable module parameter, add <em>cumulative</em> CRC counters (Experimental Pi's <code>lastgood</code>/<code>lasterror</code> are consecutive-run counters and cannot express a rate), and sweep it:</p>
@@ -1082,6 +1055,32 @@ exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 
       <li><strong>The dB API can set mute instead of a level.</strong> This control reports its dB <em>minimum</em> as the mute sentinel, so interpolating from it lands below the audible floor. Use the raw volume range, which is already linear in dB on this card and therefore already perceptually linear.</li>
     </ul>
     <div class="note warn"><strong>Mute above zero, not at it.</strong> <code>input_defuzz_abs_event()</code> drops changes smaller than <code>fuzz/2</code>, so with any useful fuzz the final wheel 1 → 0 step never reaches userspace: volume rests at the floor and stays quietly audible forever. Treat anything at or below a small threshold as mute, and toggle the element's <code>pswitch</code> as well — minimum volume is not necessarily silence.</div>
+
+
+    <p>Worth recording, because each looks like an obvious defect and none needs fixing.</p>
+    <p>The driver derives the peripheral base by reading the <code>/soc</code> <code>ranges</code> property by <code>u32</code> index — which ought to break under a 64-bit kernel's two-cell parent addresses. It doesn't. The author wrote a fallback that reads index 1, sees the high word <code>0x00000000</code>, and drops to index 2 for <code>0xfe000000</code>. It resolves correctly on both architectures.</p>
+    <p>Similarly, the panel needed no sync-polarity inversion. Experimental Pi's timings carried <code>h_sync_polarity=1</code> and <code>v_sync_polarity=1</code>, which map onto the overlay's defaults; adding <code>hsync-invert</code>/<code>vsync-invert</code> would have broken a working display.</p>
+
+    <h3>The red LED ignores you, and should</h3>
+    <p>Writes to <code>green</code> work and are true PWM brightness — <code>15</code> is visibly dimmer than <code>100</code>, so pulsing and breathing patterns are available. Writes to <code>red</code> do nothing at any value, alone or combined, even though the element clearly lights on its own. That reads as a broken output. It is not.</p>
+    <p>The driver <em>does</em> transmit the value. The outbound protocol round-robins four settings, one per packet, selected by a high byte:</p>
+<pre><code>data[GC_LENGTH+0] = 0xC0 | (index &amp; 0x3);      <span class="c">// 0xC2 = red, 0xC3 = green</span>
+data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan, red, green</span></code></pre>
+    <p>Red goes out as selector <code>0xC2</code> every fourth packet and the XPi discards it, because that channel is firmware-owned. Experimental Pi documents a single <strong>bi-colour</strong> LED whose red element is a battery gauge: green at 25% or above, then yellow, then a second yellow, then red as the pack drains. It also lights with no battery fitted, and flashes a green-then-red diagnostic when the Pi is not communicating at all — behaviour that cannot involve software running on the Pi.</p>
+    <div class="note"><strong>Green is yours; red is the firmware's.</strong> Register green as a <code>leds</code> classdev and let the kernel animate it. Expose red read-only — a writable node that silently does nothing is worse than no node, and this one consumed two separate investigations. Note also that low-battery indication in a userland daemon duplicates what the firmware already signals on the same LED.</div>
+    <div class="note warn"><strong>A caution on method.</strong> Brief four-to-five second sweeps produced results that contradicted each other and sent us chasing a non-existent brightness-scale bug. Hold each state until it is confirmed by eye. Better still, check whether Experimental Pi documented the behaviour before measuring at all — the answer here sat in a public troubleshooting page the whole time.</div>
+  </section>
+
+  <section>
+    <div class="eyebrow">Open</div>
+    <h2>What is not solved</h2>
+    <h3>What a real status bar would take</h3>
+    <p>A permanent strip over both the frontend and games means running a Wayland compositor (<code>labwc</code>, <code>cage</code>) as DRM master, with ES and RetroArch as clients and a layer-shell bar (<code>waybar</code>, <code>yambar</code>) above them. That is the honest modern equivalent of dispmanx. The blocker is that RetroPie builds RetroArch <strong>without</strong> Wayland:</p>
+<pre><code>retroarch --features
+  Wayland  - Wayland input/video drivers: no
+  KMS      - Video context driver: yes</code></pre>
+    <p>So it is a compositor install, a full RetroArch rebuild from source with Wayland enabled, reworked input routing, and a compositing cost on a 640×480 panel where a 20 px bar is 4% of the screen. Treat it as its own project, with a working image backed up first.</p>
+    <p><strong>Back up the binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
 
     <h3>Two unexplained shutdowns — with a strong candidate</h3>
     <p>The unit powered itself off twice in one session: full battery, ~55 °C, no thermal or under-voltage flags, and the second with a known-good module during nothing more taxing than a <code>systemd-journald</code> restart.</p>
