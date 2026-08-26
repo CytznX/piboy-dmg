@@ -48,6 +48,8 @@ BATT_CRIT=5
 LED_NORMAL=100
 
 RA_HOST=127.0.0.1
+# Must match network_cmd_port in retroarch.cfg (the real authority) and the
+# RA_PORT in piboy-vold.c. A stale value fails silently in both daemons.
 RA_PORT=55355
 
 duty_for() {   # millidegrees -> $duty (0..255)

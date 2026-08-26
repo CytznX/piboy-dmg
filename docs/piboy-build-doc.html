@@ -998,7 +998,8 @@ data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan
           <tr><td>Volume wheel</td><td><code>piboy-vold</code>, blocking on the <code>ABS_VOLUME</code> device</td></tr>
           <tr><td>Battery reporting</td><td><code>power_supply</code> class — <em>better</em> than the original</td></tr>
           <tr><td>Clean shutdown on switch</td><td><code>piboy-fand</code> watching status bit <code>0x40</code></td></tr>
-          <tr><td>Volume &amp; battery messages on screen</td><td>RetroArch <code>SHOW_MSG</code> over UDP</td></tr>
+          <tr><td>Volume slider on screen</td><td><code>piboy-vold</code> -&gt; RetroArch <code>SHOW_MSG</code> (widgets off)</td></tr>
+          <tr><td>Battery messages on screen</td><td><code>piboy-fand</code> -&gt; RetroArch <code>SHOW_MSG</code></td></tr>
           <tr><td>Always-visible icon strip</td><td>not reimplemented — see below</td></tr>
         </tbody>
       </table>
@@ -1013,9 +1014,15 @@ data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan
 network_cmd_enable = "true"
 network_cmd_port   = "55355"
 
+<span class="c"># Widgets render every SHOW_MSG as its own card, so a wheel sweep stacks
+# dozens of them. Plain OSD draws one line that replaces itself - which is
+# what a volume slider wants. Note this is global: it also turns off the
+# achievement and fast-forward widgets.</span>
+menu_enable_widgets = "false"
+
 <span class="c"># push a message onto the running game — no netcat needed</span>
 exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 45%" &gt;&amp;3</code></pre>
-    <p><code>piboy-fand</code> fires this whenever the wheel moves, and again when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than Experimental Pi's static meter, which you had to look at.</p>
+    <p>Ownership is split by which daemon owns the event. <code>piboy-vold</code> draws the volume slider, because it is the process holding the wheel's evdev fd; it renders the position as <code>Volume [========--------] 50%</code>. <code>piboy-fand</code> fires the same mechanism when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than Experimental Pi's static meter, which you had to look at.</p>
     <p>For the menu itself, <code>menu_battery_level_enable</code> shows charge in RGUI's top-right — but only alongside <code>menu_timedate_enable</code>, since in RGUI they share one status line. And note RetroPie's EmulationStation has <em>no</em> status display of any kind: no clock, no battery, nothing in the binary to enable.</p>
 
     <h3>What a real status bar would take</h3>

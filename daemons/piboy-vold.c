@@ -6,11 +6,15 @@
  * no polling, no userspace deadband, and no amixer fork per change - which is
  * what the bash daemon was doing four times a second, forever.
  *
- * The PCM control spans about -102dB..+4dB linearly in dB, so the bottom of its
- * range is inaudible on this speaker: wheel 0 mutes, 1..100 maps onto
- * MIXER_FLOOR..100% of the raw volume range (see apply()).
+ * The PCM control spans about -102dB..+4dB linearly in dB, so a 1:1 wheel-to-
+ * percent mapping is audible only over the top of the travel. The wheel is
+ * instead put through Experimental Pi's own logarithmic curve, recovered from
+ * their osd binary; the bottom of the travel mutes outright (see apply()).
  *
- * cc -O2 -o piboy-vold piboy-vold.c -lasound
+ * Turning the wheel also draws a slider in the running game, which is what
+ * Experimental Pi's osd.cfg called "volumeicon" (see osd_show()).
+ *
+ * cc -O2 -o piboy-vold piboy-vold.c -lasound -lm
  */
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -21,14 +25,21 @@
 #include <errno.h>
 #include <dirent.h>
 #include <signal.h>
+#include <math.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <linux/input.h>
 #include <alsa/asoundlib.h>
 
 #define WHEEL_NAME   "PiBoy DMG Volume Wheel"
 #define MIXER_CARD   "default"
 #define MIXER_CTL    "PCM"
-#define MIXER_FLOOR  55          /* raw scale; below this the PCM control is inaudible */
 #define MUTE_BELOW   3           /* wheel positions at or under this mute outright */
+/* Must match network_cmd_port in retroarch.cfg, which is the real authority.
+ * piboy-fand carries the same constant for its battery warnings. A stale value
+ * here fails SILENTLY - both senders ignore every error - so change all three. */
+#define RA_PORT      55355
+#define OSD_CELLS    16          /* slider width, in characters */
 
 static volatile sig_atomic_t running = 1;
 static void on_signal(int sig) { (void)sig; running = 0; }
@@ -84,13 +95,85 @@ static int mixer_open(void)
     return elem ? 0 : -1;
 }
 
+/* Draw the wheel position as a slider inside the running game.
+ *
+ * Experimental Pi's osd.cfg called this "volumeicon" and drew a real slider on
+ * a dispmanx overlay plane. That is not reachable here: under KMS only the DRM
+ * master may commit to a plane, and RetroArch (or EmulationStation) holds it.
+ * The nearest equivalent is to ask the process that DOES own the display to
+ * draw for us, via RetroArch's UDP command port.
+ *
+ * Fire-and-forget by design: the socket is non-blocking, nothing is read back,
+ * and every error is ignored - a volume wheel must never stall waiting on an
+ * OSD. Only RetroArch listens, so this silently draws nothing under
+ * EmulationStation and under the standalone ports; the wheel still works there,
+ * it just gives no feedback. That is the limit of the mechanism, not a bug.
+ *
+ * The socket is deliberately left UNCONNECTED. connect() would let this use
+ * send() and drop the address global, but a connected UDP socket latches the
+ * ICMP port-unreachable that a closed loopback port returns and then fails
+ * every OTHER send with ECONNREFUSED (measured). That would blank half the
+ * slider updates in the moment RetroArch starts listening. */
+static int osd_fd = -1;
+static struct sockaddr_in osd_addr;
+
+static void osd_open(void)
+{
+    osd_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (osd_fd < 0)
+        return;
+    memset(&osd_addr, 0, sizeof osd_addr);
+    osd_addr.sin_family      = AF_INET;
+    osd_addr.sin_port        = htons(RA_PORT);
+    osd_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+}
+
+static void osd_show(int wheel)
+{
+    char msg[64], bar[OSD_CELLS + 1];
+    int i, filled;
+
+    if (osd_fd < 0)
+        return;
+
+    /* Round to nearest cell so the bar reaches both ends of its travel. The
+     * loop bound is OSD_CELLS, not filled, so an out-of-range wheel saturates
+     * the bar instead of running off it - no clamp needed here. */
+    filled = (wheel * OSD_CELLS + 50) / 100;
+    for (i = 0; i < OSD_CELLS; i++)
+        bar[i] = i < filled ? '=' : '-';
+    bar[OSD_CELLS] = '\0';
+
+    if (wheel <= MUTE_BELOW)
+        snprintf(msg, sizeof msg, "SHOW_MSG Volume [%s] MUTE", bar);
+    else
+        snprintf(msg, sizeof msg, "SHOW_MSG Volume [%s] %3d%%", bar, wheel);
+
+    /* strlen, not snprintf's return: that reports what WOULD have been written,
+     * so a future longer format would send past the end of msg. */
+    (void)sendto(osd_fd, msg, strlen(msg), MSG_DONTWAIT,
+                 (struct sockaddr *)&osd_addr, sizeof osd_addr);
+}
+
 /* Wheel 0..100 -> mixer percent on the RAW volume range.
  *
  * Deliberately not the dB API: this control reports its dB minimum as the mute
  * sentinel (a huge negative), so interpolating from it lands below the audible
  * floor and snaps to mute. The raw range is already linear in dB on this card
- * (measured: 30% = -70.47dB, 60% = -38.56dB, 100% = +4.00dB), which is also
- * perceptually linear, so a plain percentage is the right mapping. */
+ * (measured: 30% = -70.47dB, 60% = -38.56dB, 100% = +4.00dB) - which is exactly
+ * why a 1:1 wheel-to-percent map is audible only near the top of the travel,
+ * and why a curve is needed at all.
+ *
+ * The curve is Experimental Pi's, lifted from the osd binary they shipped:
+ * a log10 call against literal-pool constants 9.0, 100.0 and 1.0, scaled by
+ * 100, which their code handed to `amixer -q sset 'PCM' %d%%`.
+ *
+ *     percent = (int)(100 * log10(wheel * 9/100 + 1))
+ *
+ * It is an exact identity at both ends - log10(1) = 0 and log10(10) = 1 - and
+ * bows upward in between (wheel 25 -> 51%, wheel 50 -> 74%), which is what
+ * makes a dB-linear control feel even across the travel. Truncated, not
+ * rounded, to match the original's (int) cast. */
 static void apply(int wheel)
 {
     static int last = -1;
@@ -100,10 +183,13 @@ static void apply(int wheel)
     if (wheel < 0) wheel = 0;
     if (wheel > 100) wheel = 100;
 
-    /* Mute a little above zero, not only at it. The kernel axis fuzz drops
-     * changes smaller than fuzz/2, so the final 1 -> 0 step never arrives and the
-     * wheel would otherwise rest at MIXER_FLOOR - quietly audible forever. */
-    pct = wheel > MUTE_BELOW ? MIXER_FLOOR + wheel * (100 - MIXER_FLOOR) / 100 : 0;
+    /* Mute a little above zero, not only at it, and keep it a TRUE mute.
+     * The kernel axis fuzz drops changes smaller than fuzz/2, so the final
+     * 1 -> 0 step never arrives; without this the wheel would rest on the
+     * curve's bottom step (wheel 1 -> 3%) forever. Experimental Pi's curve
+     * reaches 0% at wheel 0 on its own, but 0% on this control is -102.39dB,
+     * which is not silence - hence the switch below rather than a low level. */
+    pct = wheel > MUTE_BELOW ? (int)(100.0 * log10(wheel * 9.0 / 100.0 + 1.0)) : 0;
     if (pct == last)
         return;                          /* distinct wheel steps can map alike */
 
@@ -152,7 +238,11 @@ int main(void)
         return 1;
     }
 
-    /* Seed from the current wheel position rather than waiting for a turn. */
+    osd_open();
+
+    /* Seed from the current wheel position rather than waiting for a turn.
+     * Nothing is drawn: nobody asked for the volume, so nothing should appear
+     * on screen. Only the event loop below draws. */
     if (ioctl(fd, EVIOCGABS(ABS_VOLUME), &abs) >= 0)
         apply(abs.value);
 
@@ -170,8 +260,13 @@ int main(void)
             break;                     /* never `continue` - that is a 100%% CPU spin */
         }
         snd_mixer_handle_events(mixer);   /* pick up changes made by others */
-        if (ev.type == EV_ABS && ev.code == ABS_VOLUME)
+        if (ev.type == EV_ABS && ev.code == ABS_VOLUME) {
+            /* Draw before apply(): the curve maps several wheel steps onto one
+             * percent, and apply() returns early on those - but a slider that
+             * freezes while the wheel is visibly turning reads as broken. */
+            osd_show(ev.value);
             apply(ev.value);
+        }
     }
 
     snd_mixer_close(mixer);
