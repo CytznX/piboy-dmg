@@ -1,0 +1,14 @@
+# The control panel starts and stops these units from a dialog menu on a device
+# with no keyboard. Without a rule, sudo prompts for a password inside a dialog
+# that owns the tty: the menu appears to hang and the toggle silently does
+# nothing. Scoped to three verbs on three units rather than granting the menu
+# blanket sudo.
+cytzenx ALL=(root) NOPASSWD: /usr/bin/systemctl start soapyremote-server.service, \
+                             /usr/bin/systemctl stop soapyremote-server.service, \
+                             /usr/bin/systemctl reset-failed soapyremote-server.service, \
+                             /usr/bin/systemctl start piboy-smartscope.service, \
+                             /usr/bin/systemctl stop piboy-smartscope.service, \
+                             /usr/bin/systemctl reset-failed piboy-smartscope.service, \
+                             /usr/bin/systemctl start piboy-rtl433.service, \
+                             /usr/bin/systemctl stop piboy-rtl433.service, \
+                             /usr/bin/systemctl reset-failed piboy-rtl433.service

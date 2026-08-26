@@ -3,16 +3,25 @@ Description=LabNation SmartScope network server
 Documentation=https://github.com/labnation/DeviceInterface.CXX
 After=network.target avahi-daemon.service
 Wants=avahi-daemon.service
+# Without these, Restart=on-failure under systemd's defaults can burn the whole
+# restart budget during a boot-time race and leave the unit permanently failed -
+# the same lesson piboy-vold and piboy-fand already record.
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
 Type=simple
+# Not root. 99-labnation-smartscope.rules grants the scope to plugdev precisely
+# so this does not need to be, and a network-listening libusb server is the last
+# thing to leave privileged. Running as root would also make that rule inert.
+User=cytzenx
+SupplementaryGroups=plugdev
 ExecStart=/usr/bin/smartscopeserver
-# The upstream installer wraps this in a shell loop that greps its own logfile
-# for "Moving from state Started -> Stopped" and relaunches. systemd already
-# does supervision properly; a 5s backoff avoids hammering a missing device.
+# Upstream's installer wraps this in a shell loop that greps its own logfile for
+# "Moving from state Started -> Stopped" and relaunches. systemd supervises
+# properly; the backoff just avoids hammering a missing device.
 Restart=on-failure
 RestartSec=5
-Nice=0
 
 [Install]
 WantedBy=multi-user.target
