@@ -43,8 +43,16 @@ else
 fi
 
 if [ -z "$HOST" ]; then
-    head_ "no address"
-    say "Pass the PiBoy's address to continue:   smartscope-connect.sh 10.1.1.34"
+    # Step 1 can only succeed when a scope IS attached - the server publishes
+    # nothing before that - so auto-discovery works precisely in the case where
+    # nothing is wrong. Exiting here would abandon the user in the situation
+    # they actually ran this for, right after promising a diagnosis.
+    head_ "2-3. need an address to continue"
+    say "Discovery found nothing, which is expected when no scope is attached,"
+    say "so there is no address to check. Give one and the remaining steps run:"
+    say ""
+    say "    smartscope-connect.sh 10.1.1.34"
+    say "    PI_HOST=piboy64.local smartscope-connect.sh"
     exit 1
 fi
 
@@ -73,8 +81,16 @@ case "$state" in
 esac
 
 head_ "3. is a scope actually plugged into it?"
+# lsusb -d exits 1 when it matches nothing, so "no scope" and "ssh broke" both
+# yield empty output - separate them by exit code rather than reporting one as
+# the other, which is the whole point of this script.
 usb=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$PIBOY_USER@$HOST" "lsusb -d $SCOPE_VID:" 2>/dev/null)
-if [ -n "$usb" ]; then
+usb_rc=$?
+if [ "$usb_rc" -gt 1 ]; then
+    say "could not check: ssh or lsusb failed on the handheld (exit $usb_rc)."
+    say "That is not a verdict on the scope - look at Attached hardware in the"
+    say "menu on the device itself."
+elif [ -n "$usb" ]; then
     printf '  %s\n' "$usb"
     case "$usb" in
         *f4b5*) say "NOTE: f4b5 is the firmware-loading state. Give it a moment;"
