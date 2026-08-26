@@ -4,124 +4,162 @@
 export TERM=linux
 BACKTITLE="PiBoy DMG - Instrument Servers"
 DATA=$HOME/instruments/data
+TMP=/tmp/inst.out                       # one screen is shown at a time
 
-svc_state() {   # -> "on" / "off" / "absent"
-    systemctl list-unit-files "$1" >/dev/null 2>&1 || { echo absent; return; }
-    systemctl is-active --quiet "$1" && echo on || echo off
+# Every instrument is described once, here. Adding a fourth means adding a row,
+# not renumbering a menu and a case arm in lockstep. Discovery by unit-name
+# convention would not work: soapyremote-server ships from the distro package
+# and matches no naming scheme this repo controls.
+UNITS=(
+    "soapyremote-server.service|SDR streaming server (SoapyRemote)"
+    "piboy-smartscope.service|Scope server (SmartScope)"
+    "piboy-rtl433.service|Decoder logger (rtl_433 -> JSON)"
+)
+
+dlg() { dialog --backtitle "$BACKTITLE" "$@"; }
+
+# One systemctl call for every unit rather than two per unit. LoadState
+# distinguishes "not installed" from "installed but stopped", which the marker
+# below actually renders - on a fresh machine the units may genuinely be absent,
+# and showing that as an ordinary stopped service sends you debugging the wrong
+# thing.
+declare -A LOAD ACTIVE
+read_states() {
+    local u n l a
+    for u in "${UNITS[@]}"; do
+        n=${u%%|*}
+        # One call per unit, two lines read by position within that call. Asking
+        # for several units at once returns them separated by a blank line, so a
+        # flat index over the whole output silently shears the values across
+        # unit boundaries - it reported one unit's ActiveState as another's
+        # LoadState, and only looked right because the absent case happened to
+        # fall through to the same marker.
+        { read -r l; read -r a; } < <(systemctl show -p LoadState -p ActiveState --value "$n" 2>/dev/null)
+        LOAD[$n]=$l; ACTIVE[$n]=$a
+    done
 }
-dot() { [ "$1" = on ] && printf '[ON ]' || printf '[   ]'; }
+marker() {
+    case "${LOAD[$1]:-}" in
+        not-found|"") printf '[ -- ]' ;;                      # unit file missing
+        *) [ "${ACTIVE[$1]:-}" = active ] && printf '[ ON ]' || printf '[    ]' ;;
+    esac
+}
 
-addrs() { ip -4 addr show | grep -oE 'inet [0-9.]+' | awk '{print $2}' | grep -v '^127'; }
+addrs() { hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]' ; }
+
+show_file() { dlg --title "$1" --textbox "$TMP" 22 74; }
 
 info_screen() {
     local ip; ip=$(addrs | head -1)
-    dialog --backtitle "$BACKTITLE" --title "Connecting a client" --msgbox "\
+    dlg --title "Connecting a client" --msgbox "\
 This device: $(hostname)   $(addrs | tr '\n' ' ')
 
 SDR streaming (SoapyRemote)
-  Server listens on tcp 55132 and announces itself over mDNS.
-  Clients that speak SoapySDR can use it directly:
+  Listens on tcp 55132, announced over mDNS as _soapy._tcp.
+  Anything speaking SoapySDR uses it directly:
 
     SoapySDRUtil --find=\"driver=remote\"
-    SDR++ / gqrx / GNU Radio: choose the Remote / Soapy source
+    gqrx / SDR++ / GNU Radio: pick the Remote or Soapy source
     and enter    $ip    (or $(hostname).local)
 
-  Anything SoapySDR supports works - HackRF, RTL-SDR, others.
-
 Decoder logging (rtl_433)
-  Writes newline-delimited JSON to
+  Newline-delimited JSON at
     $DATA/rtl433.jsonl
   Collect it from a client with:
     ssh $(whoami)@$ip tail -f $DATA/rtl433.jsonl
 
 Scope server (SmartScope)
-  LabNation's own C++ server, announced over mDNS the same way.
-  Start it here, then plug the scope in - it waits for the device.
-  On a client, LabNation's SmartScope app finds it automatically;
-  if it does not, point it at    $ip
+  LabNation's own server, announced as _sss._tcp. Start it here,
+  then plug the scope in - it waits for the device. Their app
+  finds it by itself; if not, point it at    $ip
 
-  Scope not detected? Check it appears under Attached hardware
-  (USB 04d8:0052, or 04d8:f4b5 while loading firmware).
-" 22 74
+  Scope missing? Check Attached hardware for usb 04d8:0052
+  (or 04d8:f4b5 while it loads firmware). Ids come from
+  99-labnation-smartscope.rules, which is authoritative.
+" 24 74
 }
 
-logs_screen() {
-    local unit=$1
-    journalctl -u "$unit" -n 200 --no-pager > /tmp/inst.log 2>&1
-    dialog --backtitle "$BACKTITLE" --title "$unit (last 200 lines)" --textbox /tmp/inst.log 22 74
+logs_menu() {
+    local items=() u n l
+    for u in "${UNITS[@]}"; do n=${u%%|*}; l=${u##*|}; items+=("$n" "$l"); done
+    local pick
+    pick=$(dlg --title "Logs" --cancel-label "Back" --menu "" 14 66 6 "${items[@]}" 3>&1 1>&2 2>&3) || return
+    journalctl -u "$pick" -n 200 --no-pager > "$TMP" 2>&1
+    show_file "$pick (last 200 lines)"
 }
 
 data_screen() {
     if [ -s "$DATA/rtl433.jsonl" ]; then
-        local n; n=$(wc -l < "$DATA/rtl433.jsonl")
-        tail -200 "$DATA/rtl433.jsonl" > /tmp/inst.data
-        dialog --backtitle "$BACKTITLE" --title "rtl433.jsonl - $n records, last 200" \
-               --textbox /tmp/inst.data 22 74
+        # Size, not a line count: this file grows without bound while the logger
+        # runs, and counting lines means reading all of it off the SD card just
+        # to title a window.
+        local sz; sz=$(du -h "$DATA/rtl433.jsonl" | cut -f1)
+        tail -200 "$DATA/rtl433.jsonl" > "$TMP"
+        show_file "rtl433.jsonl - $sz, last 200 records"
     else
-        dialog --backtitle "$BACKTITLE" --msgbox "No decoder data yet.\n\nStart the rtl_433 logger and leave it running with a receiver attached." 10 60
-    fi
-}
-
-toggle() {   # unit, friendly name
-    local unit=$1 name=$2
-    if systemctl is-active --quiet "$unit"; then
-        sudo systemctl stop "$unit"
-        dialog --backtitle "$BACKTITLE" --msgbox "$name stopped." 7 44
-    else
-        # A unit that failed earlier stays in the failed state and drags that
-        # into the next attempt's status; clear it so each start is judged on
-        # its own outcome.
-        sudo systemctl reset-failed "$unit" 2>/dev/null
-        if sudo systemctl start "$unit" 2>/tmp/inst.err; then
-            sleep 1
-            if systemctl is-active --quiet "$unit"; then
-                dialog --backtitle "$BACKTITLE" --msgbox "$name started." 7 44
-            else
-                journalctl -u "$unit" -n 15 --no-pager > /tmp/inst.err
-                dialog --backtitle "$BACKTITLE" --title "$name failed to stay up" --textbox /tmp/inst.err 18 70
-            fi
-        else
-            dialog --backtitle "$BACKTITLE" --title "Could not start $name" --textbox /tmp/inst.err 12 60
-        fi
+        dlg --msgbox "No decoder data yet.\n\nStart the rtl_433 logger and leave it running with a receiver attached." 10 60
     fi
 }
 
 hw_screen() {
-    { echo "== USB devices =="; lsusb
-      echo; echo "== SoapySDR sees =="; SoapySDRUtil --find 2>&1 | sed -n '1,25p'
+    dlg --infobox "Scanning hardware..." 3 40      # the Soapy probe takes seconds
+    { echo "== USB =="; lsusb
+      echo; echo "== SoapySDR sees =="; SoapySDRUtil --find 2>&1 | sed -n '1,25p;25q'
       echo; echo "== HackRF =="; hackrf_info 2>&1 | head -12
       echo; echo "== SmartScope =="
-      lsusb -d 04d8: 2>/dev/null || echo "no LabNation device on USB (04d8:0052 / 04d8:f4b5)"
-    } > /tmp/inst.hw 2>&1
-    dialog --backtitle "$BACKTITLE" --title "Attached hardware" --textbox /tmp/inst.hw 22 74
+      lsusb -d 04d8: 2>/dev/null || echo "no LabNation device (04d8:0052 / 04d8:f4b5)"
+    } > "$TMP" 2>&1
+    show_file "Attached hardware"
+}
+
+toggle() {
+    local unit=$1 name=$2
+    if [ "${LOAD[$unit]:-}" = not-found ]; then
+        dlg --msgbox "$name is not installed on this system.\n\nRun instruments/install.sh from the repo." 9 60
+        return
+    fi
+    if systemctl is-active --quiet "$unit"; then
+        sudo systemctl stop "$unit"
+        dlg --msgbox "$name stopped." 7 44
+        return
+    fi
+    # A unit that failed earlier stays failed and drags that into this attempt's
+    # status; clear it so each start is judged on its own outcome.
+    sudo systemctl reset-failed "$unit" 2>/dev/null
+    sudo systemctl start "$unit" > "$TMP" 2>&1
+    # Type=simple units are active the moment the fork succeeds, so a doomed
+    # process still reports success here. The pause is what lets it fail.
+    sleep 1
+    if systemctl is-active --quiet "$unit"; then
+        dlg --msgbox "$name started." 7 44
+    else
+        # Append rather than overwrite: systemctl's own stderr is often the only
+        # place a permission problem is explained, and the journal alone would
+        # not mention it.
+        { echo "--- journal ---"; journalctl -u "$unit" -n 15 --no-pager; } >> "$TMP" 2>&1
+        show_file "$name did not start"
+    fi
 }
 
 while true; do
-    sdr=$(svc_state soapyremote-server.service)
-    sco=$(svc_state piboy-smartscope.service)
-    r43=$(svc_state piboy-rtl433.service)
-    CHOICE=$(dialog --backtitle "$BACKTITLE" --title "Instrument Servers" \
-        --cancel-label "Exit" --menu "\nGamepad: D-pad to move, A to select, B to go back\n" 20 68 10 \
-        1 "$(dot "$sdr") SDR streaming server (SoapyRemote)" \
-        2 "$(dot "$sco") Scope server (SmartScope)" \
-        3 "$(dot "$r43") Decoder logger (rtl_433 -> JSON)" \
-        4 "Attached hardware" \
-        5 "How to connect a client" \
-        6 "Collected data" \
-        7 "Logs: SDR server" \
-        8 "Logs: scope server" \
-        9 "Logs: decoder" \
-        3>&1 1>&2 2>&3) || break
+    read_states
+    items=(); i=1
+    for u in "${UNITS[@]}"; do
+        items+=("$i" "$(marker "${u%%|*}") ${u##*|}"); i=$((i+1))
+    done
+    items+=(h "Attached hardware" c "How to connect a client" d "Collected data" l "Logs")
+    CHOICE=$(dlg --title "Instrument Servers" --cancel-label "Exit" \
+        --menu "\nD-pad to move, A to select, B to go back\n" 18 68 8 "${items[@]}" 3>&1 1>&2 2>&3) || break
     case "$CHOICE" in
-        1) toggle soapyremote-server.service "SDR streaming server" ;;
-        2) toggle piboy-smartscope.service   "Scope server" ;;
-        3) toggle piboy-rtl433.service       "Decoder logger" ;;
-        4) hw_screen ;;
-        5) info_screen ;;
-        6) data_screen ;;
-        7) logs_screen soapyremote-server.service ;;
-        8) logs_screen piboy-smartscope.service ;;
-        9) logs_screen piboy-rtl433.service ;;
+        [0-9]*) sel=${UNITS[$((CHOICE-1))]}; toggle "${sel%%|*}" "${sel##*|}" ;;
+        h) hw_screen ;;
+        c) info_screen ;;
+        d) data_screen ;;
+        l) logs_menu ;;
+        # Without this an unmatched tag silently repaints the menu, and an
+        # operator with no keyboard cannot tell that from a toggle that did
+        # nothing.
+        *) dlg --msgbox "Unhandled menu tag: $CHOICE\n\nThis is a bug in menu.sh." 8 50 ;;
     esac
 done
 clear

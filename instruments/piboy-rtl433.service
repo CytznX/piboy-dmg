@@ -6,12 +6,19 @@ After=network.target
 [Service]
 Type=simple
 User=cytzenx
-# -d "" probed ALSA audio inputs and died; let rtl_433 pick the attached SDR.
-# Override RTL433_ARGS in /etc/default/piboy-rtl433 to force a device, e.g.
-#   RTL433_ARGS=-d driver=hackrf        (HackRF via SoapySDR)
-#   RTL433_ARGS=-d 0                    (first RTL-SDR dongle)
-EnvironmentFile=-/etc/default/piboy-rtl433
-ExecStart=/bin/sh -c '/usr/bin/rtl_433 $RTL433_ARGS -F json:/home/cytzenx/instruments/data/rtl433.jsonl -M time:iso -M level'
+# rtl_433 finds the attached SDR by itself. To pin one when several are present,
+# use systemd's own override rather than an EnvironmentFile plus a `sh -c`
+# wrapper to word-split it - the wrapper cost an extra process and left
+# $MAINPID pointing at the shell instead of rtl_433:
+#
+#   sudo systemctl edit piboy-rtl433
+#     [Service]
+#     ExecStart=
+#     ExecStart=/usr/bin/rtl_433 -d driver=hackrf -F json:/home/cytzenx/instruments/data/rtl433.jsonl -M time:iso -M level
+#
+# An earlier version passed -d "" here, which sent rtl_433 probing ALSA audio
+# inputs and dying with an ALSA error rather than a device error.
+ExecStart=/usr/bin/rtl_433 -F json:/home/cytzenx/instruments/data/rtl433.jsonl -M time:iso -M level
 Restart=no
 Nice=5
 
