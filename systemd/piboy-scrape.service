@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Skyscraper attempt (ScreenScraper anonymous quota resets daily)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cytzenx
+ExecStart=/home/cytzenx/scrape-daily.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

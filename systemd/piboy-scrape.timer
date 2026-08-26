@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Skyscraper catch-up once a day
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=30m
+# The handheld is off most of the time; run on the next boot if 04:00 was missed.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
