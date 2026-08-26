@@ -35,7 +35,13 @@ Decoder logging (rtl_433)
     ssh $(whoami)@$ip tail -f $DATA/rtl433.jsonl
 
 Scope server (SmartScope)
-  Not yet installed - see the build notes in ~/instruments/.
+  LabNation's own C++ server, announced over mDNS the same way.
+  Start it here, then plug the scope in - it waits for the device.
+  On a client, LabNation's SmartScope app finds it automatically;
+  if it does not, point it at    $ip
+
+  Scope not detected? Check it appears under Attached hardware
+  (USB 04d8:0052, or 04d8:f4b5 while loading firmware).
 " 22 74
 }
 
@@ -62,6 +68,10 @@ toggle() {   # unit, friendly name
         sudo systemctl stop "$unit"
         dialog --backtitle "$BACKTITLE" --msgbox "$name stopped." 7 44
     else
+        # A unit that failed earlier stays in the failed state and drags that
+        # into the next attempt's status; clear it so each start is judged on
+        # its own outcome.
+        sudo systemctl reset-failed "$unit" 2>/dev/null
         if sudo systemctl start "$unit" 2>/tmp/inst.err; then
             sleep 1
             if systemctl is-active --quiet "$unit"; then
@@ -80,31 +90,38 @@ hw_screen() {
     { echo "== USB devices =="; lsusb
       echo; echo "== SoapySDR sees =="; SoapySDRUtil --find 2>&1 | sed -n '1,25p'
       echo; echo "== HackRF =="; hackrf_info 2>&1 | head -12
+      echo; echo "== SmartScope =="
+      lsusb -d 04d8: 2>/dev/null || echo "no LabNation device on USB (04d8:0052 / 04d8:f4b5)"
     } > /tmp/inst.hw 2>&1
     dialog --backtitle "$BACKTITLE" --title "Attached hardware" --textbox /tmp/inst.hw 22 74
 }
 
 while true; do
     sdr=$(svc_state soapyremote-server.service)
+    sco=$(svc_state piboy-smartscope.service)
     r43=$(svc_state piboy-rtl433.service)
     CHOICE=$(dialog --backtitle "$BACKTITLE" --title "Instrument Servers" \
         --cancel-label "Exit" --menu "\nGamepad: D-pad to move, A to select, B to go back\n" 20 68 10 \
         1 "$(dot "$sdr") SDR streaming server (SoapyRemote)" \
-        2 "$(dot "$r43") Decoder logger (rtl_433 -> JSON)" \
-        3 "Attached hardware" \
-        4 "How to connect a client" \
-        5 "Collected data" \
-        6 "Logs: SDR server" \
-        7 "Logs: decoder" \
+        2 "$(dot "$sco") Scope server (SmartScope)" \
+        3 "$(dot "$r43") Decoder logger (rtl_433 -> JSON)" \
+        4 "Attached hardware" \
+        5 "How to connect a client" \
+        6 "Collected data" \
+        7 "Logs: SDR server" \
+        8 "Logs: scope server" \
+        9 "Logs: decoder" \
         3>&1 1>&2 2>&3) || break
     case "$CHOICE" in
         1) toggle soapyremote-server.service "SDR streaming server" ;;
-        2) toggle piboy-rtl433.service "Decoder logger" ;;
-        3) hw_screen ;;
-        4) info_screen ;;
-        5) data_screen ;;
-        6) logs_screen soapyremote-server.service ;;
-        7) logs_screen piboy-rtl433.service ;;
+        2) toggle piboy-smartscope.service   "Scope server" ;;
+        3) toggle piboy-rtl433.service       "Decoder logger" ;;
+        4) hw_screen ;;
+        5) info_screen ;;
+        6) data_screen ;;
+        7) logs_screen soapyremote-server.service ;;
+        8) logs_screen piboy-smartscope.service ;;
+        9) logs_screen piboy-rtl433.service ;;
     esac
 done
 clear

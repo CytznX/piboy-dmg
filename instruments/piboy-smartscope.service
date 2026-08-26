@@ -1,0 +1,18 @@
+[Unit]
+Description=LabNation SmartScope network server
+Documentation=https://github.com/labnation/DeviceInterface.CXX
+After=network.target avahi-daemon.service
+Wants=avahi-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/smartscopeserver
+# The upstream installer wraps this in a shell loop that greps its own logfile
+# for "Moving from state Started -> Stopped" and relaunches. systemd already
+# does supervision properly; a 5s backoff avoids hammering a missing device.
+Restart=on-failure
+RestartSec=5
+Nice=0
+
+[Install]
+WantedBy=multi-user.target
