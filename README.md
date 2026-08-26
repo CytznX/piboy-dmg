@@ -21,6 +21,7 @@ work; this is one worked example.
 |---|---|
 | `driver/` | `xpi_gamecon` ported 5.10 → 6.18, plus Experimental Pi original and a diff |
 | `daemons/` | Fan curve, volume wheel, and a Start+Select escape hatch for console emulators |
+| `instruments/` | SDR and oscilloscope servers, and the EmulationStation menu that drives them |
 | `migration/` | Image the original card, repartition, copy, rewrite PARTUUIDs, restore ROMs |
 | `scripts/` | ROM library tools: NeoGeo DAT rebuild, PS1 reorganisation, CHD conversion, scraping |
 | `roms/` | Library audit and deduplication |

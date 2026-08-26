@@ -1,0 +1,5 @@
+# LabNation SmartScope. Two product ids: 0x0052 is the scope in normal
+# operation, 0xF4B5 the bootloader/firmware-load state. Without this the
+# server needs root to claim the interface.
+SUBSYSTEM=="usb", ATTR{idVendor}=="04d8", ATTR{idProduct}=="0052", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="04d8", ATTR{idProduct}=="f4b5", MODE="0660", GROUP="plugdev", TAG+="uaccess"

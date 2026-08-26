@@ -22,6 +22,16 @@ custom.toml
 id_*
 authorized_keys
 
+# Experimental Pi's OSD, recovered from the captured original card. The driver
+# they left behind is GPL and lives in driver/; this is not — `osd` is their
+# proprietary 32-bit binary, and multi_switch.sh ships with it. Kept locally
+# because the binary is unstripped and is the best surviving documentation of
+# the XPi protocol, but this repo is public, so it must not be pushed.
+# Anchored: unanchored `osd.cfg` would also swallow a documentation excerpt
+# committed under docs/ or config/, and this repo mines that file (piboy-fand's
+# fan bands and piboy-vold's volume curve both came out of it).
+/vendor-osd/
+
 # private to one machine: disk images, their checksums, rom listings
 *.pcl
 *.pcl.zstd
