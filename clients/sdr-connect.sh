@@ -11,10 +11,7 @@ set -uo pipefail
 HOST=${1:-}
 SERVICE=_soapy._tcp
 
-need() { command -v "$1" >/dev/null || { echo "missing: $1  (apt install $2)" >&2; return 1; }; }
-
 discover() {
-    need avahi-browse avahi-utils || return 1
     # Resolve rather than just browse: we want the address and port, and a
     # browse-only result tells us a name exists without proving it answers.
     avahi-browse -rtp "$SERVICE" 2>/dev/null | awk -F';' '$1=="=" {print $7" "$8" "$9}' | sort -u
@@ -24,7 +21,9 @@ echo "== looking for a SoapyRemote server on the network =="
 if [ -n "$HOST" ]; then
     echo "  using the host you gave: $HOST"
     FOUND="$HOST"
-else
+fi
+
+if [ -z "${FOUND:-}" ]; then
     if ! command -v avahi-browse >/dev/null; then
         cat >&2 <<'MSG'
   cannot search: avahi-browse is not installed here (apt install avahi-utils).
@@ -49,7 +48,7 @@ MSG
         exit 1
     fi
     for h in "${hits[@]}"; do echo "  found: $h"; done
-    FOUND=$(printf '%s\n' "${hits[0]}" | awk '{print $2}')
+    read -r _ FOUND _ <<<"${hits[0]}"
 fi
 
 PORT=55132
@@ -63,7 +62,7 @@ echo "  $FOUND:$PORT open"
 
 echo
 echo "== what radios is it serving? =="
-if need SoapySDRUtil soapysdr-tools 2>/dev/null; then
+if command -v SoapySDRUtil >/dev/null; then
     SoapySDRUtil --find="driver=remote,remote=$FOUND" 2>&1 | sed -n '/Found device/,$p' | head -20 | sed 's/^/  /'
     echo "  (no devices listed = server is up but nothing is plugged into the PiBoy)"
 else
