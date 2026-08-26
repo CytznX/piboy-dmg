@@ -48,10 +48,13 @@ MSG
         exit 1
     fi
     for h in "${hits[@]}"; do echo "  found: $h"; done
-    read -r _ FOUND _ <<<"${hits[0]}"
+    # avahi resolves to "host address port" - use the port it gave rather than
+    # assuming the default, or a server on any other port is reported dead
+    # immediately after discovery told us where it actually is.
+    read -r _ FOUND DISCOVERED_PORT <<<"${hits[0]}"
 fi
 
-PORT=55132
+PORT=${DISCOVERED_PORT:-55132}   # default only when the address came from the user
 echo
 echo "== is it answering? =="
 if ! timeout 5 bash -c ": >/dev/tcp/$FOUND/$PORT" 2>/dev/null; then
@@ -63,8 +66,14 @@ echo "  $FOUND:$PORT open"
 echo
 echo "== what radios is it serving? =="
 if command -v SoapySDRUtil >/dev/null; then
-    SoapySDRUtil --find="driver=remote,remote=$FOUND" 2>&1 | sed -n '/Found device/,$p' | head -20 | sed 's/^/  /'
-    echo "  (no devices listed = server is up but nothing is plugged into the PiBoy)"
+    found_out=$(SoapySDRUtil --find="driver=remote,remote=$FOUND" 2>&1 | sed -n '/Found device/,$p' | head -20)
+    if [ -n "$found_out" ]; then
+        printf '%s\n' "$found_out" | sed 's/^/  /'
+    else
+        # Only say this when nothing was listed. Printing it unconditionally
+        # contradicted the device list directly above it.
+        echo "  none - the server is up but nothing is plugged into the PiBoy"
+    fi
 else
     echo "  install soapysdr-tools to enumerate remotely"
 fi
