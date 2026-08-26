@@ -11,9 +11,12 @@
 # three quite different things went wrong. This can.
 set -uo pipefail
 
-HOST=${1:-}
+HOST=${1:-${PI_HOST:-}}
+PIBOY_USER=${PI_USER:-cytzenx}
 SERVICE=_sss._tcp
-SCOPE_VID=04d8            # 0052 = running, f4b5 = loading firmware
+SCOPE_VID=04d8                     # ids are authoritative in
+                                   # instruments/99-labnation-smartscope.rules:
+                                   # 0052 = running, f4b5 = loading firmware
 
 say()  { printf '  %s\n' "$*"; }
 head_() { printf '\n== %s ==\n' "$*"; }
@@ -23,11 +26,15 @@ if command -v avahi-browse >/dev/null; then
     mapfile -t hits < <(avahi-browse -rtp "$SERVICE" 2>/dev/null | awk -F';' '$1=="=" {print $7" "$8" "$9}' | sort -u)
     if [ "${#hits[@]}" -gt 0 ]; then
         for h in "${hits[@]}"; do say "found: $h"; done
-        [ -z "$HOST" ] && HOST=$(printf '%s\n' "${hits[0]}" | awk '{print $2}')
+        [ -z "$HOST" ] && read -r _ HOST _ <<<"${hits[0]}"
     else
         say "nothing published $SERVICE on this network."
-        say "mDNS does not cross subnets and some access points drop it, so this"
-        say "alone does not mean the server is down - step 2 settles that."
+        say ""
+        say "This is the EXPECTED state when no scope is plugged in. The server"
+        say "creates its listener and its mDNS advertisement only after it finds"
+        say "a scope on USB (main.cpp builds InterfaceServer with the device, not"
+        say "before it), so silence here means 'server down' OR 'no scope' OR"
+        say "'mDNS blocked' - steps 2 and 3 separate them."
     fi
 else
     say "avahi-browse not installed here (apt install avahi-utils) - skipping."
@@ -42,17 +49,31 @@ if [ -z "$HOST" ]; then
 fi
 
 head_ "2. is the server process up?"
-if ssh -o ConnectTimeout=5 -o BatchMode=yes "cytzenx@$HOST" \
-      'systemctl is-active piboy-smartscope' 2>/dev/null | grep -q '^active'; then
-    say "piboy-smartscope is running on $HOST"
-else
-    say "piboy-smartscope is NOT running (or ssh refused)."
-    say "On the handheld: Ports -> Instrument Servers -> Scope server"
+# This has to be ssh. A TCP probe - which is how the SDR helper answers the
+# same question - cannot work here, because smartscopeserver opens no socket at
+# all until a scope is attached, so "down" and "up but idle" are identical from
+# the network. Separate ssh's own failure from the service's state rather than
+# reporting one as the other.
+state=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$PIBOY_USER@$HOST" \
+          'systemctl is-active piboy-smartscope' 2>/dev/null)
+ssh_rc=$?
+if [ -z "$state" ] && [ "$ssh_rc" -ne 0 ] && [ "$ssh_rc" -ne 3 ]; then
+    say "could not reach $PIBOY_USER@$HOST over ssh (exit $ssh_rc)."
+    say "That is a login problem, not a verdict on the server: no key, sshd off,"
+    say "or a different account - set PI_USER if yours is not $PIBOY_USER."
+    say "Check on the handheld instead: Ports -> Instrument Servers."
     exit 1
 fi
+case "$state" in
+    active)   say "piboy-smartscope is running on $HOST" ;;
+    activating) say "piboy-smartscope is still starting - try again in a moment"; exit 1 ;;
+    *)        say "piboy-smartscope is $state on $HOST."
+              say "Start it: Ports -> Instrument Servers -> Scope server"
+              exit 1 ;;
+esac
 
 head_ "3. is a scope actually plugged into it?"
-usb=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "cytzenx@$HOST" "lsusb -d $SCOPE_VID: 2>/dev/null" 2>/dev/null)
+usb=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$PIBOY_USER@$HOST" "lsusb -d $SCOPE_VID:" 2>/dev/null)
 if [ -n "$usb" ]; then
     printf '  %s\n' "$usb"
     case "$usb" in
@@ -61,8 +82,9 @@ if [ -n "$usb" ]; then
     esac
 else
     say "no LabNation device on the PiBoy's USB."
-    say "The server runs happily with nothing attached - it waits - so this is"
-    say "the usual reason the app sees a server but offers no scope."
+    say "The server waits rather than exiting, so this is the usual reason for"
+    say "step 1 finding nothing while step 2 says the server is fine. Plug the"
+    say "scope in and re-run; nothing needs restarting."
 fi
 
 head_ "4. what the app should do now"
