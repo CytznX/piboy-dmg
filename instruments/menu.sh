@@ -45,7 +45,11 @@ marker() {
     esac
 }
 
-addrs() { hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]' ; }
+# Real IPv4 only. `grep '^[0-9]'` was meant to drop IPv6 but global v6 is
+# 2000::/3, so 2001:db8::1 survived it while fd00:: and fe80:: were dropped -
+# and a bare v6 address pasted into gqrx's driver=remote,remote=... will not
+# parse. Matching four dotted quads is unambiguous.
+addrs() { hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; }
 
 show_file() { dlg --title "$1" --textbox "$TMP" 22 74; }
 
@@ -103,11 +107,15 @@ data_screen() {
 
 hw_screen() {
     dlg --infobox "Scanning hardware..." 3 40      # the Soapy probe takes seconds
-    { echo "== USB =="; lsusb
-      echo; echo "== SoapySDR sees =="; SoapySDRUtil --find 2>&1 | sed -n '1,25p;25q'
-      echo; echo "== HackRF =="; hackrf_info 2>&1 | head -12
+    # Every probe is bounded. SoapySDRUtil loads every installed module and
+    # hackrf_info blocks when another process holds the radio - and the infobox
+    # has already returned, so a wedged probe leaves the handheld showing
+    # "Scanning hardware..." with no dialog and no way to cancel from a gamepad.
+    { echo "== USB =="; timeout 10 lsusb
+      echo; echo "== SoapySDR sees =="; timeout 15 SoapySDRUtil --find 2>&1 | sed -n '1,25p;25q'
+      echo; echo "== HackRF =="; timeout 10 hackrf_info 2>&1 | head -12
       echo; echo "== SmartScope =="
-      lsusb -d 04d8: 2>/dev/null || echo "no LabNation device (04d8:0052 / 04d8:f4b5)"
+      timeout 10 lsusb -d 04d8: 2>/dev/null || echo "no LabNation device (04d8:0052 / 04d8:f4b5)"
     } > "$TMP" 2>&1
     show_file "Attached hardware"
 }
@@ -118,15 +126,31 @@ toggle() {
         dlg --msgbox "$name is not installed on this system.\n\nRun instruments/install.sh from the repo." 9 60
         return
     fi
+    # -n on every sudo. Without it, a missing or mismatched sudoers rule makes
+    # sudo prompt for a password on the tty AFTER dialog has torn down the
+    # screen - on a device with no keyboard that is a power cycle. With -n it
+    # fails immediately and the failure can be shown in a dialog.
     if systemctl is-active --quiet "$unit"; then
-        sudo systemctl stop "$unit"
-        dlg --msgbox "$name stopped." 7 44
+        if ! sudo -n systemctl stop "$unit" > "$TMP" 2>&1; then
+            show_file "$name could not be stopped"; return
+        fi
+        sleep 1
+        if systemctl is-active --quiet "$unit"; then
+            # Reporting "stopped" while the marker still reads [ ON ] on the next
+            # repaint is worse than reporting nothing.
+            { echo "still running after stop"; journalctl -u "$unit" -n 15 --no-pager; } >> "$TMP" 2>&1
+            show_file "$name did not stop"
+        else
+            dlg --msgbox "$name stopped." 7 44
+        fi
         return
     fi
     # A unit that failed earlier stays failed and drags that into this attempt's
     # status; clear it so each start is judged on its own outcome.
-    sudo systemctl reset-failed "$unit" 2>/dev/null
-    sudo systemctl start "$unit" > "$TMP" 2>&1
+    sudo -n systemctl reset-failed "$unit" 2>/dev/null
+    if ! sudo -n systemctl start "$unit" > "$TMP" 2>&1; then
+        show_file "$name could not be started"; return
+    fi
     # Type=simple units are active the moment the fork succeeds, so a doomed
     # process still reports success here. The pause is what lets it fail.
     sleep 1
