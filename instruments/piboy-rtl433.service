@@ -1,0 +1,19 @@
+[Unit]
+Description=rtl_433 decoder logging to ~/instruments/data
+Documentation=man:rtl_433(1)
+After=network.target
+
+[Service]
+Type=simple
+User=cytzenx
+# -d "" probed ALSA audio inputs and died; let rtl_433 pick the attached SDR.
+# Override RTL433_ARGS in /etc/default/piboy-rtl433 to force a device, e.g.
+#   RTL433_ARGS=-d driver=hackrf        (HackRF via SoapySDR)
+#   RTL433_ARGS=-d 0                    (first RTL-SDR dongle)
+EnvironmentFile=-/etc/default/piboy-rtl433
+ExecStart=/bin/sh -c '/usr/bin/rtl_433 $RTL433_ARGS -F json:/home/cytzenx/instruments/data/rtl433.jsonl -M time:iso -M level'
+Restart=no
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
