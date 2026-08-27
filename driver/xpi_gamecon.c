@@ -10,6 +10,23 @@
 #include <linux/leds.h>
 #include <linux/hwmon.h>
 #include <linux/reboot.h>
+#include <linux/backlight.h>
+
+/* Renamed in 6.11; the driver still has to build on the 5.10 it came from. */
+#ifndef BACKLIGHT_POWER_ON
+#define BACKLIGHT_POWER_ON  FB_BLANK_UNBLANK
+#define BACKLIGHT_POWER_OFF FB_BLANK_POWERDOWN
+#endif
+
+/* flags is a bitfield the board reads as one byte. Bit 0 is panel power, bit 7
+ * says a reboot is coming rather than a shutdown - without it the XPi cuts the
+ * rail on halt and never re-asserts it, so `reboot` leaves the unit off until
+ * somebody flips the switch. Userspace used to write the whole byte, which
+ * meant every writer had to know the whole layout and could clobber the other
+ * bit. Both live behind proper interfaces now: a backlight classdev and a
+ * reboot notifier. */
+#define XPI_FLAG_PANEL   0x01
+#define XPI_FLAG_REBOOT  0x80
 
 #include <asm/io.h>
 
@@ -802,6 +819,81 @@ static const struct power_supply_desc xpi_usb_desc = {
 	.get_property	= xpi_usb_get_prop,
 };
 
+/* Read-modify-write, because the two bits have different owners. */
+static void xpi_flag_set(int mask, bool on)
+{
+	if (on)
+		values.flags_val |= mask;
+	else
+		values.flags_val &= ~mask;
+}
+
+static struct backlight_device *xpi_bl;
+
+static int xpi_bl_update(struct backlight_device *bd)
+{
+	bool on = bd->props.power == BACKLIGHT_POWER_ON && bd->props.brightness > 0;
+
+	xpi_flag_set(XPI_FLAG_PANEL, on);
+	return 0;
+}
+
+static int xpi_bl_get(struct backlight_device *bd)
+{
+	return values.flags_val & XPI_FLAG_PANEL ? 1 : 0;
+}
+
+static const struct backlight_ops xpi_bl_ops = {
+	.update_status  = xpi_bl_update,
+	.get_brightness = xpi_bl_get,
+};
+
+/* The board needs telling BEFORE the rail drops, and setting the value is not
+ * telling it. The outbound protocol round-robins four values one per packet, so
+ * the flags byte only goes out when its turn comes round - about every 33ms at
+ * 120Hz. Anything that merely assigns and returns is racing the shutdown, and
+ * loses intermittently: that is exactly how the userspace version of this
+ * failed, writing 129 at final.target and then having the rail drop before the
+ * packet was clocked out. Observed: the unit logged that it ran, and the unit
+ * still did not come back.
+ *
+ * So wait for proof of transmission. `index` advances once per outbound packet,
+ * so eight of them is two full round-robins - the flags byte has demonstrably
+ * gone out at least twice. Bounded, because a board that has stopped answering
+ * must not hang the reboot.
+ *
+ * SYS_RESTART only: on SYS_POWER_OFF the rail SHOULD drop, which is the entire
+ * point of the power switch. */
+static int xpi_reboot_notify(struct notifier_block *nb, unsigned long action, void *data)
+{
+	uint8_t start;
+	int i;
+
+	if (action != SYS_RESTART)
+		return NOTIFY_DONE;
+
+	xpi_flag_set(XPI_FLAG_REBOOT, true);
+	xpi_flag_set(XPI_FLAG_PANEL, true);   /* never hand back a dark panel */
+
+	start = READ_ONCE(index);
+	for (i = 0; i < 250; i++) {
+		if ((uint8_t)(READ_ONCE(index) - start) >= 8)
+			break;
+		mdelay(1);
+	}
+
+	if (i == 250)
+		printk(KERN_INFO "xpi_gamecon: reboot flag may not have reached the "
+		                 "board; it may not resume\n");
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block xpi_reboot_nb = {
+	.notifier_call = xpi_reboot_notify,
+};
+
+static bool xpi_reboot_ok;
+
 static int __init gc_init(void)
 {
 	/* BCM board peripherals address base */
@@ -920,6 +1012,27 @@ static int __init gc_init(void)
 	xpi_green_led.max_brightness = 255;
 	xpi_green_led.brightness = values.green_val;
 	xpi_green_led.brightness_set = xpi_green_set;
+	{
+		struct backlight_properties props = {
+			.type           = BACKLIGHT_RAW,
+			.max_brightness = 1,          /* the panel is on or off, nothing between */
+			.brightness     = 1,
+			.power          = BACKLIGHT_POWER_ON,
+		};
+
+		xpi_bl = backlight_device_register("piboy", NULL, NULL, &xpi_bl_ops, &props);
+		if (IS_ERR(xpi_bl)) {
+			printk(KERN_INFO "xpi_gamecon: backlight_device_register failed (%ld)\n",
+			       PTR_ERR(xpi_bl));
+			xpi_bl = NULL;
+		}
+	}
+
+	xpi_reboot_ok = register_reboot_notifier(&xpi_reboot_nb) == 0;
+	if (!xpi_reboot_ok)
+		printk(KERN_INFO "xpi_gamecon: register_reboot_notifier failed; "
+		                 "soft reboot will not resume\n");
+
 	if (led_classdev_register(NULL, &xpi_green_led))
 		printk(KERN_INFO "xpi_gamecon: green LED classdev failed\n");
 	else
@@ -971,6 +1084,12 @@ static void __exit gc_exit(void)
 		GC_DEL_TIMER_SYNC(&gc_base->timer);
 		gc_remove(gc_base);
 	}
+
+	if (xpi_reboot_ok)
+		unregister_reboot_notifier(&xpi_reboot_nb);
+
+	if (xpi_bl)
+		backlight_device_unregister(xpi_bl);
 
 	if (xpi_usb)
 		power_supply_unregister(xpi_usb);
