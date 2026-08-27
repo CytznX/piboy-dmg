@@ -61,9 +61,9 @@ dtoverlay=audremap,pins_18_19
 
 # --- PiBoy DMG 3.5in DPI panel (split: config.txt truncates at 98 chars) ---
 dtoverlay=vc4-kms-dpi-generic
-dtparam=clock-frequency=22800000
-dtparam=hactive=640,hfp=56,hsync=4,hbp=42
-dtparam=vactive=480,vfp=16,vsync=4,vbp=12
+dtparam=clock-frequency=27403200
+dtparam=hactive=640,hfp=80,hsync=80,hbp=80
+dtparam=vactive=480,vfp=13,vsync=13,vbp=13
 dtparam=rgb666-padhi
 dtparam=width-mm=71,height-mm=53
 
@@ -79,6 +79,3 @@ over_voltage=6
 v3d_freq=750
 initial_turbo=60
 
-# 18-bit RGB666 panel: dither to reduce banding. Value from Recalbox's
-# PiBoy config; the panel is 6 bits per channel and shows gradients.
-hvs_set_dither=0x210

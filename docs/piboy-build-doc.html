@@ -932,6 +932,17 @@ dtparam=vactive=480,vfp=16,vsync=4,vbp=12</code></pre>
 <pre><code>[DRM]: Mode 0: (640x480) 640 x 480, 60.015163 Hz</code></pre>
     <div class="note warn"><strong>A non-integer refresh ratio reads as slowness, not as stutter.</strong> At 70.06 Hz against 60 fps content, about ten frames per second are displayed twice: most last 14.3 ms, ten last 28.6 ms. Nothing is dropped &mdash; so it does not look like dropped frames &mdash; but continuous-motion games feel heavy, and the natural way to describe that is &ldquo;running at 80&ndash;90&#37; speed&rdquo;. Profiling the emulator will never find it, because the emulator is not the problem.</div>
 
+    <div class="note warn"><strong>Their 60 Hz line is marginal on this panel &mdash; take the clock, not the porches.</strong> Run as written it eventually produces <strong>vertical columns three or four pixels wide</strong>, brightest at the screen edges and fading toward the centre, with the image otherwise perfectly correct. It is not a rendering fault and nothing logs it: DRM reports the mode as enabled, the CRTC as active, and dmesg stays silent. The cause is the <strong>4-pixel hsync</strong>. Their 70 Hz default gives the panel <strong>80</strong>, and a sync pulse that short leaves the source drivers too little time to latch, so a marginal panel or ribbon tips over into column artefacts.
+    <br><br>
+    The fix keeps their proven porch structure and solves for the clock instead, which was the only part the cadence fix ever needed:
+<pre><code>dtparam=clock-frequency=<span class="hl">27403200</span>
+dtparam=hactive=640,hfp=80,hsync=<span class="hl">80</span>,hbp=80
+dtparam=vactive=480,vfp=13,vsync=13,vbp=13</code></pre>
+    880 &times; 519 at 27.4032 MHz is <strong>exactly 60.00 Hz</strong>, with a sync pulse twenty times longer than the vendor's 60 Hz line and a pixel clock <em>below</em> their 32 MHz &mdash; so more signal-integrity margin than stock, not less. Verified on hardware: columns gone, cadence judder gone.
+    <br><br>
+    Worth knowing the diagnostic path, because every instinct pointed the wrong way. The artefact appeared hours after an unrelated change, so the two most recent display edits were the obvious suspects &mdash; and reverting both (a driver change and a dither setting) changed nothing. Restoring the vendor's 70 Hz timings improved it dramatically but not completely, which is what identified the porches as the cause <em>and</em> revealed a marginal connection underneath that tight timing had been amplifying. Reseat the ribbon if any of it remains.</div>
+
+
     <h3>Pin budget</h3>
     <div class="tscroll">
       <table>

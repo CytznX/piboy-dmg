@@ -11,7 +11,13 @@ After=final.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo 129 > /sys/kernel/xpi_gamecon/flags'
+# The sleep is the point, not padding. Writing the value only sets a variable;
+# the driver clocks the flags byte out when its turn comes round in a 4-way
+# round-robin, ~33ms at 120Hz. Returning immediately races the rail dropping,
+# and loses intermittently - observed: this unit logged that it ran and the
+# unit still did not resume. Superseded by the driver's reboot notifier, which
+# waits for proof of transmission instead of guessing.
+ExecStart=/bin/sh -c 'echo 129 > /sys/kernel/xpi_gamecon/flags; sleep 0.3'
 RemainAfterExit=no
 
 [Install]
