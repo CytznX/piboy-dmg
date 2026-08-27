@@ -41,6 +41,15 @@ HOLD        = 2.0                           # console emulators: RetroArch absen
 HOLD_FORCE  = 5.0                           # anything, including a wedged RetroArch
 SHELLS      = {'bash', 'sh', 'dash', 'runcommand.sh'}
 
+# Idle blanking. The XPi owns LCD power through bit 0 of this register - it is
+# not DRM/DPMS, and it is the only software path to the backlight, which is the
+# largest single draw on a battery handheld.
+FLAGS_NODE  = '/sys/kernel/xpi_gamecon/flags'
+# Overridable so the behaviour can be exercised without waiting five minutes,
+# and tuned without editing this file. 0 disables blanking entirely.
+IDLE_BLANK  = float(os.environ.get('PIBOY_IDLE_BLANK', 300))
+DRM_GLOB    = '/sys/class/drm/card*-HDMI-A-*'
+
 def log(msg):
     print(f"piboy-escaped: {msg}", flush=True)
 
@@ -123,6 +132,40 @@ def escape(force=False):
     return True
 
 
+def hdmi_active():
+    """True when an external display is lit and carrying the picture.
+
+    `enabled`, not `status`: a cable plugged in after boot leaves the connector
+    connected but disabled, because SDL's KMSDRM backend picks a connector once
+    at startup and never migrates - EmulationStation is still on the panel and
+    blanking it would leave no visible display at all. Only when the connector
+    is enabled is the panel genuinely redundant, and then piboy-display owns it;
+    this daemon must keep its hands off either way.
+    """
+    for d in glob.glob(DRM_GLOB):
+        try:
+            with open(os.path.join(d, 'enabled')) as f:
+                if f.read().strip() != 'enabled':
+                    continue
+            with open(os.path.join(d, 'status')) as f:
+                if f.read().strip() == 'connected':
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def lcd(on):
+    """Switch the panel. Returns False if the node cannot be written, so the
+    caller can stop trying rather than log once per idle period forever."""
+    try:
+        with open(FLAGS_NODE, 'w') as f:
+            f.write('1\n' if on else '0\n')
+        return True
+    except OSError:
+        return False
+
+
 # EVIOCSMASK = _IOW('E', 0x93, struct input_mask{u32 type; u32 size; u64 ptr})
 EVIOCSMASK = 0x40104593
 
@@ -135,13 +178,22 @@ def _set_mask(fd, ev_type, mask):
 
 
 def filter_to_buttons(fd):
-    """Deliver only BTN_SELECT/BTN_START presses on this fd.
+    """Deliver button presses on this fd, dropping the pad's idle chatter.
 
     The PiBoy pad syncs on a 125Hz timer, so an unfiltered fd wakes this daemon
     ~20 times a second forever on EV_ABS/EV_SYN traffic it does not care about.
-    Masking at the kernel means the process sleeps until one of the two buttons
-    it actually watches changes state. Best-effort: older kernels and some
-    drivers reject EVIOCSMASK, and an unfiltered fd still works correctly.
+    The TYPE mask is what stops that, and it is the part that matters.
+
+    The CODE mask is narrowed to the two combo buttons only when idle blanking
+    is off. With blanking on it must stay wide: the kernel drops masked-out
+    codes before userspace ever sees them, so a two-code mask means the panel
+    could only be woken with Start or Select - which is not discoverable, and
+    reads as a screen that will not come back. Widening costs a wakeup per
+    button press, which by definition only happens when someone is already
+    there; the idle case that matters for battery is still zero.
+
+    Best-effort: older kernels and some drivers reject EVIOCSMASK, and an
+    unfiltered fd still works correctly.
     """
     try:
         type_mask = bytearray(8)                       # which EV_* types at all
@@ -149,8 +201,11 @@ def filter_to_buttons(fd):
         _set_mask(fd, EV_SYN, type_mask)
 
         code_mask = bytearray(96)                      # which keys within EV_KEY
-        for code in (BTN_SELECT, BTN_START):
-            code_mask[code // 8] |= 1 << (code % 8)
+        if IDLE_BLANK > 0:
+            code_mask = bytearray(b'\xff' * 96)        # any button must wake the panel
+        else:
+            for code in (BTN_SELECT, BTN_START):
+                code_mask[code // 8] |= 1 << (code % 8)
         _set_mask(fd, EV_KEY, code_mask)
         return True
     except OSError:
@@ -267,6 +322,18 @@ def main():
     held = {}                                   # fd -> set of codes currently down
     fds = {}
 
+    # Unblank on startup, so a restart always recovers a panel that a previous
+    # instance switched off and never switched back on - but NOT while an
+    # external display is lit, where piboy-display has blanked it deliberately
+    # and this would fight it on every restart.
+    blanked = False
+    can_blank = IDLE_BLANK > 0
+    if can_blank:
+        can_blank = os.access(FLAGS_NODE, os.W_OK) if hdmi_active() else lcd(True)
+    if IDLE_BLANK > 0 and not can_blank:
+        log(f"{FLAGS_NODE} not writable - idle blanking disabled")
+    last_input = time.time()
+
     # Install the watch BEFORE the first scan. The other order silently drops
     # every event in the gap, and with inotify up nothing else ever re-scans.
     # This unit is only After=multi-user.target, so it can start while udev is
@@ -278,7 +345,8 @@ def main():
         log("inotify unavailable - falling back to a slow /dev/input poll")
 
     first = sync_pads(fds, held)
-    log(f"watching {len(fds)} input devices ({first.masked} kernel-filtered to Start/Select); "
+    log(f"watching {len(fds)} input devices ({first.masked} kernel-filtered to "
+        f"{'buttons' if IDLE_BLANK > 0 else 'Start/Select'}); "
         f"{HOLD:.0f}s to escape, {HOLD_FORCE:.0f}s to force")
 
     armed = True                                # require release before re-firing
@@ -301,10 +369,19 @@ def main():
         # which an on-demand daemon started from runcommand hooks cannot promise.
         # Never block indefinitely with no devices open - that would be a
         # permanently dead daemon with no path to recovery.
+        # Seconds until the panel should blank, or None when there is nothing
+        # to time. A select() deadline rather than a poll: the daemon sleeps
+        # until the exact moment it must act, so idling costs zero wakeups.
+        blank_in = None
+        if can_blank and not blanked:
+            blank_in = max(0.0, (last_input + IDLE_BLANK) - time.time())
+
         if since is not None:
             timeout = 0.25                 # timing a hold
         elif rescan_at:
             timeout = max(0.0, rescan_at - time.time())
+        elif blank_in is not None:
+            timeout = blank_in
         elif fds:
             timeout = None                 # an input event or inotify will wake us
         else:
@@ -390,6 +467,15 @@ def main():
                 continue
             for off in range(0, len(data) - EV_SIZE + 1, EV_SIZE):
                 _, _, etype, code, value = struct.unpack('llHHi', data[off:off + EV_SIZE])
+                if etype == EV_KEY:
+                    # Any button counts as interaction, not just the combo:
+                    # EVIOCSMASK already discarded everything that is not a
+                    # key, so this is exactly the traffic worth waking for.
+                    last_input = time.time()
+                    if blanked:
+                        lcd(True)
+                        blanked = False
+                        log("input - panel back on")
                 if etype != EV_KEY or code not in (BTN_SELECT, BTN_START):
                     continue
                 s = held.setdefault(fd, set())
@@ -397,6 +483,19 @@ def main():
                     s.add(code)
                 else:
                     s.discard(code)
+
+        # Blank once the deadline passes. Skipped entirely while an external
+        # display is lit: there the panel is already off by piboy-display's
+        # doing, and switching it back on when input arrives would undo that.
+        if can_blank and not blanked and time.time() - last_input >= IDLE_BLANK:
+            if hdmi_active():
+                last_input = time.time()   # nothing to do; re-arm rather than spin
+            elif lcd(False):
+                blanked = True
+                log("idle %.0fs - panel off" % IDLE_BLANK)
+            else:
+                can_blank = False
+                log("could not write %s - idle blanking disabled" % FLAGS_NODE)
 
         # Evaluate the hold on every pass, not only on an event: autorepeat is
         # not guaranteed, so a held combo may produce no further events at all.
@@ -420,6 +519,11 @@ def main():
                     armed = False
                 else:
                     next_try = now + 1.0
+
+    # Never leave the panel dark for the next process to puzzle over. The unit's
+    # ExecStopPost repeats this as root, which covers a crash or SIGKILL.
+    if blanked:
+        lcd(True)
 
     for fd in fds:
         os.close(fd)

@@ -373,7 +373,7 @@
           <tr><td>Battery &amp; charge telemetry</td><td><span class="pill done">working</span></td><td><code>/sys/kernel/xpi_gamecon/</code></td></tr>
           <tr><td>Fan control</td><td><span class="pill done">working</span></td><td><code>piboy-fand</code> (new)</td></tr>
           <tr><td>Full 1800 MHz clock</td><td><span class="pill done">working</span></td><td><code>avoid_warnings=2</code></td></tr>
-          <tr><td>Speaker audio routing</td><td><span class="pill done">working</span></td><td><code>/etc/asound.conf</code></td></tr>
+          <tr><td>Speaker audio routing</td><td><span class="pill done">working</span></td><td><code>/etc/asound.conf</code>, written by <code>piboy-display</code></td></tr>
           <tr><td>Hardware volume wheel</td><td><span class="pill done">working</span></td><td><code>piboy-vold</code> on evdev</td></tr>
           <tr><td>Battery in ES / RetroArch</td><td><span class="pill done">working</span></td><td><code>power_supply</code> class</td></tr>
           <tr><td>Status LED</td><td><span class="pill done">green only</span></td><td><code>leds</code> class + triggers</td></tr>
@@ -382,7 +382,11 @@
           <tr><td>RetroArch + cores + ES</td><td><span class="pill done">working</span></td><td>built from source</td></tr>
           <tr><td>In-game volume &amp; battery OSD</td><td><span class="pill done">working</span></td><td>RetroArch <code>SHOW_MSG</code></td></tr>
           <tr><td><strong>Clean shutdown on power switch</strong></td><td><span class="pill done">working</span></td><td><code>KEY_POWER</code> → logind</td></tr>
-          <tr><td>Persistent status bar</td><td><span class="pill open">not done</span></td><td>needs a compositor</td></tr>
+          <tr><td>LCD power under software control</td><td><span class="pill done">working</span></td><td>XPi <code>flags</code> bit 0</td></tr>
+          <tr><td>Idle screen blanking</td><td><span class="pill done">working</span></td><td><code>piboy-escaped</code>, wakes on any button</td></tr>
+          <tr><td>Follow the HDMI cable, both ways</td><td><span class="pill done">working</span></td><td><code>piboy-display</code> + udev</td></tr>
+          <tr><td>Clock &amp; battery in the frontend</td><td><span class="pill done">working</span></td><td>patched into EmulationStation</td></tr>
+          <tr><td>Status bar <em>over games</em></td><td><span class="pill open">not done</span></td><td>needs a compositor &mdash; and that breaks launching</td></tr>
         </tbody>
       </table>
     </div>
@@ -1023,6 +1027,12 @@ exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 
     </ul>
     <p>The cost may well be real and simply invisible to every instrument on the device. Trading two steps of protocol margin — on the link carrying controls, battery telemetry <em>and</em> the power switch — for an unmeasurable saving is a bad bargain. A bench supply with a current meter on the rail would settle it in minutes; until then, leave it at 7.</p>
 
+    <h3>Check the work against someone else's port</h3>
+    <p>Recalbox ships an <strong>official 64-bit PiBoy DMG build</strong> (<code>recalbox-rpi4_64.img.xz</code>), which is both a fallback worth knowing about and a free second opinion on every decision here. Its image carries a full support package: the same GPL <code>xpi_gamecon</code> driver (patched to add an <code>xpicase</code> parameter), a <code>vc4-kms-dpi-piboydmg</code> overlay, and a case installer.</p>
+    <p>Where it agreed, it confirmed things worked out from first principles: their overlay uses <code>dpi_18bit_cpadhi_gpio0</code>, which is the same pad-high layout as <code>rgb666-padhi</code>; their installer documents the status byte as VBus / power-button / VSTAT2 / VSTAT1, matching the <code>data[5]&amp;0xC6</code> decode and the <code>0x40</code> power bit measured here; and they carry the same <code>avoid_warnings=2</code> and <code>audremap,pins_18_19</code>.</p>
+    <p>Three things were worth taking outright: <code>hvs_set_dither=0x210</code> (dithering on an 18-bit panel), driving LCD power through the XPi <code>flags</code> register, and <code>129</code> to make reboot survive. All three are in this build now.</p>
+    <div class="note"><strong>Where the comparison paid off most was the defect it did not have to find.</strong> Their battery indicator decides charge state with <code>if amps &lt; 0: return False</code> &mdash; inferring direction from the sign of a sensor that dithers between <code>0</code> and <code>-50</code> on a full pack, which is precisely the bug documented above and fixed here by deriving from the VBus bit with a deadband. Their indicator is also not a screen indicator at all: it flashes the green LED from a Python thread polling sysfs every two seconds, where registering the battery as a <code>power_supply</code> lets the kernel's own LED triggers do it with no userspace at all. Two ports, same hardware, same vendor driver &mdash; and the standard-subsystem route is the one that deletes code.</div>
+
     <h3>Register with the kernel's subsystems, not a private sysfs tree</h3>
     <p>Experimental Pi exposed everything through one bespoke kobject — <code>/sys/kernel/xpi_gamecon/{fan,green,volume,battery,…}</code> — which only their binary understood. Four small registrations put the same hardware behind interfaces the rest of Linux already speaks, and each one deletes userspace code rather than adding it.</p>
 
@@ -1072,6 +1082,49 @@ data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan
   </section>
 
   <section>
+    <div class="eyebrow">Measured</div>
+    <h2>The panel is the XPi's, not the display stack's</h2>
+
+    <p>Two questions look the same and are not: <em>can software turn this screen off</em>, and <em>can software read the brightness wheel</em>. The first is yes, and it took an embarrassingly long time to find. The second is no, and no amount of looking changes it.</p>
+
+    <div class="note warn"><strong>Do not go looking for the panel in DRM.</strong> <code>/sys/class/drm/card0-DPI-1/dpms</code> is read-only; <code>vcgencmd display_power 0</code> is inert under KMS (measured: the state reads <code>1</code> before, during and after); <code>/sys/class/graphics/fb0/blank</code> already reads <code>4</code> while the panel is lit, because fbcon is decoupled from what EmulationStation draws; and the DRM DPMS ioctl needs DRM master, which ES holds. All four are dead ends, and concluding from them that the panel cannot be switched off is wrong.</div>
+
+    <p>LCD power belongs to the XPi microcontroller, through <strong>bit 0 of its <code>flags</code> register</strong> &mdash; a node the vendor's driver has exposed all along:</p>
+
+<pre><code>echo 0 &gt; /sys/kernel/xpi_gamecon/flags   <span class="c"># panel off</span>
+echo 1 &gt; /sys/kernel/xpi_gamecon/flags   <span class="c"># panel on</span></code></pre>
+
+    <div class="note warn"><strong>It is a bitfield written as a whole byte, with no read-modify-write.</strong> Bit 7 means &ldquo;a reboot is coming&rdquo;, so <code>129</code> is <code>0x80|0x01</code> &mdash; reboot pending <em>plus</em> keep the panel lit, which is why it is not <code>128</code>. Writing a bare <code>0</code> or <code>1</code> therefore also clears the reboot bit. That is safe only because the unit which writes <code>129</code> runs <code>After=final.target</code>, i.e. last. Anything that reorders it breaks reboot silently.</div>
+
+    <h3>Soft reboot now comes back</h3>
+    <p>This closes a long-standing open item. <code>systemctl reboot</code> used to take the unit down and leave it down until the physical switch was flipped, because the XPi cuts the rail on halt and never re-asserts it. Writing <strong>129</strong> before rebooting tells the board otherwise. Measured: new boot ID, back on the network in ~30&nbsp;s, no switch touched. A systemd unit bound to <code>reboot.target</code> does it, so <code>poweroff</code> still drops the rail as it should.</p>
+
+    <h3>The brightness wheel is analog and always will be</h3>
+    <p>The XPi packet is <code>GC_LENGTH = 12</code> with the CRC over <code>data[0..9]</code>, and all ten payload bytes are spoken for &mdash; header, two axes, two button bytes, status, volume, battery voltage, current, percent. There is no brightness byte, no input device for it, and the alternate <code>0xA5</code>/<code>0x5A</code> packet types only change what the host writes <em>back</em>. Recalbox's build of the same driver exposes the same attribute set and contains no brightness string either. The wheel is a potentiometer wired straight into the backlight circuit; it never reaches the Pi. Any &ldquo;screen off at zero&rdquo; feature has to be driven by something else &mdash; which is what idle blanking is.</p>
+
+    <h3>Idle blanking, without giving up the zero-wakeup property</h3>
+    <p>Blanking lives in <code>piboy-escaped</code> because the signal it needs &mdash; when input last arrived &mdash; is already there. That daemon enumerates <code>/dev/input</code>, masks events in the kernel, follows hotplug by inotify, and blocks. The blank deadline is expressed as the <code>select()</code> timeout rather than a poll, so an idle handheld still costs <strong>zero wakeups</strong> until the moment it must act.</p>
+    <div class="note"><strong>The event mask decides whether waking works at all.</strong> <code>EVIOCSMASK</code> was narrowed to Start and Select, and the kernel drops masked-out codes before userspace sees them &mdash; so the panel blanked correctly and then could only be woken with those two buttons. It reads as a screen that will not come back. The code mask must stay wide. The <em>type</em> mask must not: measured on this pad, an idle device emits <strong>0 events/sec</strong> with <code>EV_KEY</code> alone and <strong>50/sec</strong> once <code>EV_ABS</code> is admitted, because the driver syncs on a 125&nbsp;Hz timer. So axis-only pads (an Xbox d-pad is <code>ABS_HAT0</code>) need a face button to wake the screen; the built-in pad is unaffected, its d-pad being <code>EV_KEY</code>.</div>
+
+    <h3>Following the cable, in both directions</h3>
+    <p>SDL's KMSDRM backend picks a connector once at startup and <strong>never migrates</strong>. Plugging HDMI in mid-session therefore does nothing, and unplugging it kills EmulationStation outright rather than falling back to the panel. Two signals tell these apart, and confusing them is what makes a handheld go dark:</p>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Connector</th><th><code>status</code></th><th><code>enabled</code></th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>plugged in after boot</td><td>connected</td><td><strong>disabled</strong></td><td>ES is still on the panel &mdash; do NOT blank it</td></tr>
+          <tr><td>present at boot</td><td>connected</td><td><strong>enabled</strong></td><td>ES took the HDMI CRTC &mdash; the panel is redundant</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>To actually follow the cable, EmulationStation has to restart &mdash; and RetroPie already supports that. Its wrapper loops on <code>/tmp/es-restart</code>, the same file ES's own restart menu entry touches:</p>
+<pre><code>touch /tmp/es-restart
+kill -TERM "$(pgrep -f "^$ES_BIN")"   <span class="c"># just the binary, not the wrapper</span></code></pre>
+    <p>The binary comes back under the same wrapper on the same tty, so <code>runcommand</code> keeps its terminal &mdash; the thing that breaks when ES is orphaned with <code>nohup</code>. Measured on both swaps: ~2&nbsp;s, wrapper PIDs unchanged, <code>crtc</code> moving between <code>pixelvalve-0</code> (panel) and <code>pixelvalve-4</code> (HDMI1).</p>
+    <div class="note warn"><strong>Never swap out from under a running game.</strong> That is somebody's unsaved progress. Defer to the next time they are at the menu &mdash; and do not record the new display state when you defer, or every later check sees no change and the swap is lost for good.</div>
+  </section>
+
+  <section>
     <div class="eyebrow">Open</div>
     <h2>What is not solved</h2>
     <h3>What a real status bar would take</h3>
@@ -1094,8 +1147,6 @@ data[GC_LENGTH+1] = values.data[index &amp; 0x3];  <span class="c">// flags, fan
     <h3>NeoGeo is blocked by content, not by software</h3>
     <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The backup restored from Experimental Pi's own card did not contain one either, which means NeoGeo never worked on the original machine. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
 
-    <h3>Soft reboot does not come back</h3>
-    <p><code>systemctl reboot</code> takes the unit down and it stays down — the XPi appears to cut power on halt without re-asserting it, so the physical switch has to be flipped. Worth knowing before you issue a remote reboot on a device sitting in another room, and worth designing around if you script anything.</p>
 
     <div class="note warn"><strong>The rail really is low.</strong> <code>avoid_warnings=2</code> restores full speed by suppressing the firmware's <em>reaction</em>, not by fixing the voltage — the XPi's boost output still dips below what the Pi expects. Experimental Pi shipped it this way for years, so it is evidently survivable, but you are running the SoC through those dips. Treat clean shutdowns as mandatory and keep backups current.</div>
   </section>

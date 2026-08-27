@@ -1,0 +1,18 @@
+[Unit]
+# Without this the XPi cuts the rail on halt and never re-asserts it, so
+# `systemctl reboot` takes the unit down and it stays down until the physical
+# switch is flipped. Writing 129 (0x81) tells the board a reboot is coming.
+# WantedBy=reboot.target, so it fires ONLY on reboot - on poweroff the rail
+# should genuinely drop.
+Description=Tell the XPi that a reboot, not a shutdown, is coming
+DefaultDependencies=no
+Before=reboot.target
+After=final.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 129 > /sys/kernel/xpi_gamecon/flags'
+RemainAfterExit=no
+
+[Install]
+WantedBy=reboot.target

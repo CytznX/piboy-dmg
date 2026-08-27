@@ -1,0 +1,167 @@
+#!/bin/bash
+#
+# piboy-display - keep the PiBoy's panel, its audio, and EmulationStation on
+# whichever display is actually present.
+#
+# Two jobs, and they key off different signals:
+#
+#   Which display should be used  -> `status` (is a cable in?)
+#   Which display IS being used   -> `enabled` (did something light it?)
+#
+# SDL's KMSDRM backend picks a connector once at startup and never migrates, so
+# plugging HDMI in mid-session does nothing on its own and unplugging it kills
+# EmulationStation outright. The only way to follow the cable is to restart ES,
+# which RetroPie's own wrapper supports: it loops on /tmp/es-restart, so
+# touching that file and terminating just the binary relaunches it in place -
+# same wrapper, same tty, no getty restart and no orphaning.
+#
+# LCD power is the XPi's, through bit 0 of its flags register; nothing in the
+# display stack can switch this panel.
+
+set -u
+
+FLAGS=${PIBOY_FLAGS:-/sys/kernel/xpi_gamecon/flags}
+ASOUND=${PIBOY_ASOUND:-/etc/asound.conf}
+DRM=${PIBOY_DRM:-/sys/class/drm}
+STATE=${PIBOY_STATE:-/run/piboy-display.target}
+ES_BIN=${PIBOY_ES_BIN:-/opt/retropie/supplementary/emulationstation/emulationstation}
+SPEAKER=Headphones
+MODE=${1:-}
+
+log() { logger -t piboy-display -- "$*"; }
+
+# Is a cable in? Decides what SHOULD be used, so `status`, not `enabled`.
+hdmi_present() {
+    local d
+    for d in "$DRM"/card*-HDMI-A-*; do
+        [ -e "$d/status" ] || continue
+        [ "$(cat "$d/status" 2>/dev/null)" = connected ] && return 0
+    done
+    return 1
+}
+
+# Which HDMI output is LIT, as an ALSA card name. `enabled`, because audio and
+# the panel must follow what is actually on screen, not what is merely plugged
+# in - a cable present but unlit means ES is still on the panel.
+active_hdmi_card() {
+    local d n
+    for d in "$DRM"/card*-HDMI-A-*; do
+        [ -e "$d/enabled" ] || continue
+        [ "$(cat "$d/enabled" 2>/dev/null)" = enabled ] || continue
+        [ "$(cat "$d/status" 2>/dev/null)" = connected ] || continue
+        n=${d##*-HDMI-A-}
+        echo "vc4hdmi$((n - 1))"
+        return
+    done
+}
+
+# Never restart out from under a game: that is somebody's unsaved progress.
+# The swap then happens the next time they are back at the menu.
+game_running() {
+    pgrep -f "runcommand.sh" >/dev/null 2>&1 && return 0
+    pgrep -x "retroarch" >/dev/null 2>&1 && return 0
+    return 1
+}
+
+set_lcd() {
+    [ -w "$FLAGS" ] || return 0
+    printf '%s\n' "$1" > "$FLAGS" 2>/dev/null
+}
+
+set_audio() {
+    local card="$1" tmp
+    grep -q "hw:${card},0" "$ASOUND" 2>/dev/null && return 0
+    tmp=$(mktemp "${ASOUND}.XXXXXX") || return 0
+    cat > "$tmp" <<EOF
+# Written by piboy-display. Card by NAME, never index: plugging an HDMI
+# display renumbers the ALSA cards.
+pcm.!default {
+    type plug
+    slave.pcm "hw:${card},0"
+}
+ctl.!default {
+    type hw
+    card ${card}
+}
+EOF
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$ASOUND" && log "default audio -> ${card}"
+}
+
+restart_es() {
+    local pid
+    pid=$(pgrep -x -f "$ES_BIN" | head -1)
+    if [ -n "$pid" ]; then
+        # RetroPie's wrapper loops on this file, so the binary comes straight
+        # back under the same wrapper and the same tty.
+        touch /tmp/es-restart
+        kill -TERM "$pid"
+        log "restarting EmulationStation in place (pid $pid)"
+    else
+        # It already died - unplugging the connector it was drawing on kills it
+        # and the wrapper's loop exits. Only a fresh login session brings it
+        # back, and getty is what owns that.
+        log "EmulationStation not running; restarting the tty1 session"
+        systemctl restart getty@tty1
+    fi
+}
+
+# Apply the panel and audio state for whatever is currently lit.
+apply() {
+    local hdmi
+    hdmi=$(active_hdmi_card)
+    if [ -n "$hdmi" ]; then
+        set_lcd 0
+        set_audio "$hdmi"
+    else
+        set_lcd 1
+        set_audio "$SPEAKER"
+    fi
+}
+
+if [ "$MODE" = "--switch" ]; then
+    want=lcd
+    hdmi_present && want=hdmi
+    had=$(cat "$STATE" 2>/dev/null || echo "")
+
+    if [ -z "$had" ]; then
+        # No recorded state: first run of the boot, since STATE lives on tmpfs.
+        # Record what is true and do nothing else - treating "unknown" as a
+        # change would restart EmulationStation on every single boot.
+        printf '%s\n' "$want" > "$STATE" 2>/dev/null
+        apply
+    elif [ "$want" != "$had" ]; then
+        printf '%s\n' "$want" > "$STATE" 2>/dev/null
+        if game_running; then
+            log "display changed to $want, but a game is running - deferring the swap"
+            # Leave the panel on regardless: blanking it while ES is still
+            # drawing there would leave nothing visible at all.
+            set_lcd 1
+        else
+            log "display changed to $want - swapping"
+            restart_es
+            # Let ES claim a CRTC before deciding what is lit.
+            for _ in $(seq 1 20); do
+                sleep 1
+                [ -n "$(active_hdmi_card)" ] && break
+                hdmi_present || break
+            done
+            apply
+        fi
+    else
+        apply
+    fi
+    exit 0
+fi
+
+if [ "$MODE" = "--wait" ]; then
+    for _ in $(seq 1 30); do
+        [ -n "$(active_hdmi_card)" ] && break
+        sleep 2
+    done
+    want=lcd
+    hdmi_present && want=hdmi
+    printf '%s\n' "$want" > "$STATE" 2>/dev/null
+fi
+
+apply

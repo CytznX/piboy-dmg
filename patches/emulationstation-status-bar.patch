@@ -1,0 +1,122 @@
+diff --git a/es-core/src/Settings.cpp b/es-core/src/Settings.cpp
+index 42d138b..4f1c909 100644
+--- a/es-core/src/Settings.cpp
++++ b/es-core/src/Settings.cpp
+@@ -46,6 +46,7 @@ void Settings::setDefaults()
+ 	mBoolMap["ParseGamelistOnly"] = false;
+ 	mBoolMap["ShowHiddenFiles"] = false;
+ 	mBoolMap["DrawFramerate"] = false;
++	mBoolMap["DrawStatusBar"] = true;
+ 	mBoolMap["ShowExit"] = true;
+ 	mBoolMap["Windowed"] = false;
+ 	mBoolMap["SplashScreen"] = true;
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index a5a056f..d9c7f9d 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -8,6 +8,15 @@
+ #include "Log.h"
+ #include "Renderer.h"
+ #include <iomanip>
++#include <fstream>
++#include <sstream>
++#include <ctime>
++#include <string>
++
++// The xpi_gamecon driver registers the pack as a standard power_supply, so the
++// status bar needs nothing board-specific - just two small sysfs reads. On any
++// machine without this node the bar quietly degrades to a clock.
++#define STATUS_BAR_BATTERY "/sys/class/power_supply/xpi-battery"
+ 
+ Window::Window() : mNormalizeNextUpdate(false), mFrameTimeElapsed(0), mFrameCountElapsed(0), mAverageDeltaTime(10),
+ 	mAllowSleep(true), mSleeping(false), mTimeSinceLastInput(0), mScreenSaver(NULL), mRenderScreenSaver(false), mInfoPopup(NULL)
+@@ -210,6 +219,9 @@ void Window::update(int deltaTime)
+ 			mFrameDataText = std::unique_ptr<TextCache>(mDefaultFonts.at(1)->buildTextCache(ss.str(), 50.f, 50.f, 0xFF00FFFF));
+ 		}
+ 
++		if(Settings::getInstance()->getBool("DrawStatusBar"))
++			updateStatusBar();
++
+ 		mFrameTimeElapsed = 0;
+ 		mFrameCountElapsed = 0;
+ 	}
+@@ -224,6 +236,51 @@ void Window::update(int deltaTime)
+ 		mScreenSaver->update(deltaTime);
+ }
+ 
++static std::string readSysfsLine(const std::string& path)
++{
++	std::ifstream f(path);
++	std::string line;
++	if(f && std::getline(f, line))
++		return line;
++	return "";
++}
++
++// Rebuilt on the same 500ms tick as the framerate counter, never per frame:
++// buildTextCache lays out glyphs, and Font.h is explicit that re-rendering a
++// cache is much cheaper than rebuilding one.
++void Window::updateStatusBar()
++{
++	std::stringstream ss;
++	
++	const time_t now = time(nullptr);
++	struct tm lt;
++	char clock[6] = { 0 };
++	if(localtime_r(&now, &lt))
++		strftime(clock, sizeof(clock), "%H:%M", &lt);
++	ss << clock;
++	
++	const std::string cap = readSysfsLine(STATUS_BAR_BATTERY "/capacity");
++	if(!cap.empty())
++	{
++		const std::string st = readSysfsLine(STATUS_BAR_BATTERY "/status");
++		ss << ((st == "Charging" || st == "Full") ? "  chg " : "  bat ") << cap << "%";
++	}
++	
++	const std::string text = ss.str();
++	// The clock only changes once a minute and capacity every few minutes, so
++	// ~119 of every 120 ticks would otherwise re-lay-out an identical string -
++	// sizeText and buildTextCache each walk it, and the cache is reallocated.
++	if(text == mStatusStr)
++		return;
++	mStatusStr = text;
++
++	auto& font = mDefaultFonts.at(0);
++	const float pad = 8.f;
++	const float w = font->sizeText(text).x();
++	mStatusText = std::unique_ptr<TextCache>(font->buildTextCache(
++		text, (float)Renderer::getScreenWidth() - w - pad, pad, 0xFFFFFFC8));
++}
++
+ void Window::render()
+ {
+ 	Transform4x4f transform = Transform4x4f::Identity();
+@@ -253,6 +310,12 @@ void Window::render()
+ 		mDefaultFonts.at(1)->renderTextCache(mFrameDataText.get());
+ 	}
+ 
++	if(Settings::getInstance()->getBool("DrawStatusBar") && mStatusText)
++	{
++		Renderer::setMatrix(Transform4x4f::Identity());
++		mDefaultFonts.at(0)->renderTextCache(mStatusText.get());
++	}
++
+ 	unsigned int screensaverTime = (unsigned int)Settings::getInstance()->getInt("ScreenSaverTime");
+ 	if(mTimeSinceLastInput >= screensaverTime && screensaverTime != 0)
+ 		startScreenSaver();
+diff --git a/es-core/src/Window.h b/es-core/src/Window.h
+index c14a28c..a1262ac 100644
+--- a/es-core/src/Window.h
++++ b/es-core/src/Window.h
+@@ -99,6 +99,10 @@ private:
+ 
+ 	std::unique_ptr<TextCache> mFrameDataText;
+ 
++	void updateStatusBar();
++	std::unique_ptr<TextCache> mStatusText;
++	std::string mStatusStr;
++
+ 	bool mNormalizeNextUpdate;
+ 
+ 	bool mAllowSleep;
