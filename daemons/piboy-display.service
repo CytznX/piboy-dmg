@@ -1,0 +1,14 @@
+[Unit]
+# Runs once after boot, when the connectors are lit and EmulationStation has
+# claimed a CRTC. The udev rule handles later plug/unplug; this covers the
+# boot-time case, which is the only one where ES actually ends up on HDMI.
+Description=Follow the active display on the PiBoy DMG
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/piboy-display --wait
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

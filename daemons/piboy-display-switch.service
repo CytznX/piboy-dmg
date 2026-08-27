@@ -1,0 +1,9 @@
+[Unit]
+Description=Swap the PiBoy display when a cable is plugged or unplugged
+# Serialised against the boot-time pass so the two cannot both restart ES.
+After=piboy-display.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/piboy-display --switch
+TimeoutStartSec=90

@@ -4,7 +4,20 @@ After=multi-user.target
 
 [Service]
 Type=simple
+# The flags node is 0660 root:root and this unit runs as the console user, so
+# hand it group write. `+` runs these as root regardless of User= below.
+ExecStartPre=+/bin/sh -c 'chgrp input /sys/kernel/xpi_gamecon/flags 2>/dev/null; chmod 0660 /sys/kernel/xpi_gamecon/flags 2>/dev/null; true'
 ExecStart=/usr/local/sbin/piboy-escaped
+# Restore the panel on ANY exit, including a crash or SIGKILL that never reaches
+# the daemon's own cleanup. This is why no polling watchdog is needed: systemd
+# already knows the exact moment the risk appears.
+#
+# Delegates to piboy-display rather than writing 1 blindly, because "restore"
+# is not always "panel on": with an external display lit, piboy-display has
+# blanked the panel deliberately and a fixed write would undo that on every
+# restart. Falls back to a plain unblank if that script is missing, since a lit
+# panel is the safe failure.
+ExecStopPost=+/bin/sh -c '/usr/local/sbin/piboy-display 2>/dev/null || echo 1 > /sys/kernel/xpi_gamecon/flags 2>/dev/null; true'
 Restart=on-failure
 RestartSec=5
 # Runs as the console user, not root: the emulators it must signal are that

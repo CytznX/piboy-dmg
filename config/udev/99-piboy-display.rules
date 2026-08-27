@@ -1,0 +1,4 @@
+# Follow the cable. Starts a unit rather than running the work inline: udev
+# kills long-running RUN+= children, and swapping displays means restarting
+# EmulationStation and waiting for it to claim a CRTC.
+ACTION=="change", SUBSYSTEM=="drm", RUN+="/usr/bin/systemctl start --no-block piboy-display-switch.service"
