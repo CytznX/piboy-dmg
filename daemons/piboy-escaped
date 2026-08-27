@@ -446,7 +446,13 @@ def main():
                 ino = inotify_watch()
             sync_pads(fds, held)
             retries = RETRY_MAX
-            rescan_at = 0.0 if ino is not None else time.time() + POLL
+            # Schedule a reconcile rather than deciding retry policy here.
+            # This used to discard the Sync result and then zero rescan_at,
+            # so a re-open that failed (ENODEV during a Bluetooth flap, or a
+            # node never chowned into `input`) was never retried and the
+            # device stayed unwatched for the process lifetime. The block
+            # below owns that policy; duplicating it is how the two drift.
+            rescan_at = time.time() + (DEBOUNCE if ino is not None else POLL)
             continue
 
         if ino is not None and ino in ready:
@@ -477,7 +483,12 @@ def main():
                 rescan_at = time.time() + RETRY
                 if retries == 0:
                     log(f"{r.failed} device(s) could not be opened; not retrying")
-            elif ino is None:
+            elif ino is None or not fds:
+                # Keep a slow reconcile armed when nothing is open, even with
+                # inotify healthy. The POLL timeout below is useless on its
+                # own: the rescan is gated on rescan_at, so leaving it 0.0 here
+                # means the daemon wakes every POLL seconds and does nothing,
+                # forever, with no path back to watching a device.
                 rescan_at = time.time() + POLL
             else:
                 rescan_at = 0.0
@@ -493,6 +504,13 @@ def main():
                 continue
             try:
                 data = os.read(fd, EV_SIZE * 64)
+            except BlockingIOError:
+                # Not device death. sync_pads may have closed and reopened
+                # descriptors earlier in this same pass, so a number still in
+                # `ready` can now name a different, freshly opened device with
+                # nothing to read yet. Dropping it here would discard a device
+                # that is perfectly healthy.
+                continue
             except OSError:
                 # Drop the recorded button state with the fd. A stale entry that
                 # still had both buttons down would latch `complete` True for the
