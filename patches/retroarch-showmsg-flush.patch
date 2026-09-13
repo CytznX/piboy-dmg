@@ -1,0 +1,34 @@
+SHOW_MSG: replace the pending notification instead of queueing behind it.
+
+The network command SHOW_MSG pushes with flush=false, so every message waits
+for the ones before it. RetroArch holds each for 180 frames - three seconds at
+60fps - and there is no setting to shorten that.
+
+The PiBoy's volume wheel emits ~25 events a second while turning (measured: 32
+events across a third of its travel), so an on-screen volume slider driven
+through SHOW_MSG queues roughly 25x faster than it drains and trails the hand
+by many seconds. Coalescing the sender to 8/s was tried and changed nothing;
+at three seconds a message, anything above one push per three seconds loses.
+
+flush=true makes runloop_msg_queue_push call msg_queue_clear() before pushing
+on the legacy path, and passes the same flag through to
+gfx_widgets_msg_queue_push() when widgets are active - so the newest message
+always displays immediately under either renderer. That is what a volume
+slider needs, and it is what any repeated-status use of SHOW_MSG wants:
+superseded values are worthless, not a backlog to replay.
+
+Upstream keeps flush=false so scripted one-shot notifications cannot clobber
+each other. This trades that for liveness, which is the right trade when the
+sender is a hardware control.
+
+--- a/command.c	2026-09-13 13:18:16.652195951 -0400
++++ b/command.c	2026-09-13 13:18:16.786197766 -0400
+@@ -679,7 +679,7 @@
+ 
+ bool command_show_osd_msg(command_t *cmd, const char* arg)
+ {
+-    runloop_msg_queue_push(arg, 1, 180, false, NULL,
++    runloop_msg_queue_push(arg, 1, 180, true, NULL,
+           MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+     return true;
+ }

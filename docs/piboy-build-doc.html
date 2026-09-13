@@ -386,6 +386,7 @@
           <tr><td>Idle screen blanking</td><td><span class="pill done">working</span></td><td><code>piboy-escaped</code>, wakes on any button</td></tr>
           <tr><td>Follow the HDMI cable, both ways</td><td><span class="pill done">working</span></td><td><code>piboy-display</code> + udev</td></tr>
           <tr><td>Clock &amp; battery in the frontend</td><td><span class="pill done">working</span></td><td>patched into EmulationStation</td></tr>
+          <tr><td>WiFi through the aluminium case</td><td><span class="pill done">working</span></td><td>external USB adapter &mdash; the internal radio is shielded</td></tr>
           <tr><td>Status bar <em>over games</em></td><td><span class="pill open">not done</span></td><td>needs a compositor &mdash; and that breaks launching</td></tr>
         </tbody>
       </table>
@@ -394,7 +395,7 @@
 
   <section>
     <div class="eyebrow">Read this first</div>
-    <h2>Eleven traps that cost real time</h2>
+    <h2>Fourteen traps that cost real time</h2>
     <p>Each of these presents as a hardware fault. None of them is one.</p>
 
     <div class="traps">
@@ -471,6 +472,55 @@ SystemMaxUse=64M</code></pre>
         <p>A curve is the answer, and Experimental Pi already had one. Their <code>osd</code> binary shells out to <code>amixer -q sset 'PCM' %d%%</code> with the value built from literal-pool constants 9.0, 100.0 and 1.0 and a <code>log10</code> call:</p>
 <pre><code>percent = (int)(100 * log10(wheel * 9/100 + 1))</code></pre>
         <p>An identity at both ends &mdash; <code>log10(1)=0</code>, <code>log10(10)=1</code> &mdash; bowing upward between them, so wheel 25 lands at 51% and wheel 50 at 74%. Keep a true mute at the bottom, which theirs never had: their curve reaches 0% at wheel 0 on its own, but 0% on this control is &minus;102.39 dB, which is not silence. Mute a little <em>above</em> zero and flip the element's playback switch &mdash; the wheel reports <code>fuzz=5</code>, so a 1&nbsp;&rarr;&nbsp;0 step is dropped and the wheel can rest at 1 or 2. Both the wheel and the driver report correctly throughout; it is only the mapping between them that has to be built.</p>
+      </div>
+
+      <div class="trap">
+        <h3>A device-bound ping lies when two interfaces share a subnet</h3>
+        <p>With <code>eth0</code>, <code>wlan0</code> and <code>wlan1</code> all holding addresses on <code>10.1.1.0/24</code>, Linux's default <code>arp_ignore=0</code>/<code>arp_announce=0</code> lets <em>any</em> interface answer ARP for <em>any</em> local address &mdash; "ARP flux". Replies addressed to the Wi-Fi interface come back over Ethernet, and <code>ping -I wlan1</code>, which binds to the <strong>device</strong>, never sees them.</p>
+        <p>The same link, measured three ways inside one minute:</p>
+<pre><code>ping -I wlan1       100% loss          <span class="c"># device-bound: only counts replies arriving ON wlan1</span>
+ping -I 10.1.1.38     0% loss, 2.0 ms  <span class="c"># source-bound: counts them wherever they land</span>
+ping -I 10.1.1.34     0% loss, 0.7 ms  <span class="c"># eth0 control</span></code></pre>
+        <p>It presents as catastrophic packet loss on a link whose radio counters are healthy &mdash; strong signal, high MCS rates, <code>tx failed: 0</code>. That contradiction is the tell: <strong>if the PHY looks fine and the pings do not, suspect the measurement before the radio.</strong></p>
+<pre><code><span class="c"># /etc/sysctl.d/99-piboy-multihome.conf</span>
+net.ipv4.conf.all.arp_ignore = 1
+net.ipv4.conf.all.arp_announce = 2</code></pre>
+        <div class="note warn"><strong>It also invalidates history.</strong> Every per-interface loss figure taken before this is fixed is worthless, and the failure is silent &mdash; nothing logs, and both numbers look plausible on their own. Fix the sysctls, then measure, then conclude. Diagnoses built on the earlier numbers will be confidently wrong.</div>
+      </div>
+
+      <div class="trap">
+        <h3>A fresh EmulationStation writes defaults the original never used</h3>
+        <p>Rebuilding the frontend from source means ES writes its own <code>es_settings.cfg</code>. Nothing warns you that those defaults differ from what shipped, and the difference is expensive. Measured against Experimental Pi's own card:</p>
+        <div class="tscroll">
+          <table>
+            <thead><tr><th>Setting</th><th>Experimental Pi</th><th>Fresh build</th><th>Effect</th></tr></thead>
+            <tbody>
+              <tr><td><code>PowerSaverMode</code></td><td><code>default</code></td><td><code>disabled</code></td><td>renders flat out forever</td></tr>
+              <tr><td><code>ScreenSaverBehavior</code></td><td><code>dim</code></td><td><code>slideshow</code></td><td>decodes images instead of dimming</td></tr>
+              <tr><td><code>ScreenSaverTime</code></td><td>300000</td><td>60000</td><td>enters it after 1 min, not 5</td></tr>
+              <tr><td><code>MaxVRAM</code></td><td>700</td><td>80</td><td>thrashes the texture cache</td></tr>
+              <tr><td><code>AudioDevice</code></td><td><code>PCM</code></td><td><code>HDMI</code></td><td>names a mixer that does not exist</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>All five compound. An idle frontend sat in a slideshow screensaver, cycling scraped art through an 80&nbsp;MB cache against a 4343-image library:</p>
+<pre><code>              ES idle CPU   SoC temp   fan
+shipped defaults    51%       72 C     255/255
+vendor values     6-12%    58-62 C      51-110/255   <span class="c"># ~10 C, and the fan stops shouting</span></code></pre>
+        <p>This is worth stating plainly: <strong>a fan curve cannot fix a constant load.</strong> Hours went into thermal tuning on the assumption the aluminium case was the problem. The case is a real handicap for radio, and irrelevant here &mdash; the heat was a frontend rendering a slideshow of one image, and the fix was four settings.</p>
+        <p><code>AudioDevice</code> fails differently and even more quietly. The <code>vc4-hdmi</code> cards expose <em>no</em> mixer controls at all; the only control on the machine is <code>PCM</code> on the <code>bcm2835 Headphones</code> card. Pointed at <code>HDMI</code>, ES's own volume slider silently governs nothing &mdash; sound still plays, because <code>/etc/asound.conf</code> routes the default device, so nothing looks broken. Confirm with <code>amixer -c2 scontrols</code> before believing any mixer name.</p>
+        <div class="note warn"><strong>ES rewrites <code>es_settings.cfg</code> when it exits.</strong> Edit it while ES runs and your change is overwritten on the way out, with no error. Stop the frontend first (<code>systemctl stop getty@tty1</code>), edit, then start it again &mdash; or make the change from ES's own menu.</div>
+      </div>
+
+      <div class="trap">
+        <h3>SHOW_MSG queues, so it cannot drive a live control</h3>
+        <p>RetroArch's network command <code>SHOW_MSG</code> is the obvious way to put a volume slider on screen from a daemon. It does not work for anything that updates continuously, and the reason is one argument in <code>command.c</code>:</p>
+<pre><code>runloop_msg_queue_push(arg, 1, 180, false, NULL, ...)
+                             <span class="c">^duration  ^flush</span></code></pre>
+        <p>180 frames is three seconds, there is no setting anywhere in the build to shorten it, and <code>flush=false</code> means each message waits for the ones before it. The PiBoy's wheel emits about <strong>25 events a second</strong> while turning, so a per-event slider queued roughly 25&times; faster than it drained and trailed the hand by many seconds.</p>
+        <p><strong>Coalescing the sender does not save it.</strong> Cutting 25/s to 8/s was tried first and changed nothing perceptible &mdash; against a three-second message, anything above one push per three seconds still loses. Either draw once when the control settles, or change the queue.</p>
+        <p>Flipping that one word to <code>true</code> makes <code>runloop_msg_queue_push</code> call <code>msg_queue_clear()</code> before pushing, and passes the same flag through to <code>gfx_widgets_msg_queue_push</code> when widgets are active, so the newest value always displays immediately under either renderer. RetroPie builds RetroArch from source, so this is a patch applied in <code>sources_retroarch()</code> rather than a fork &mdash; but a RetroPie-Setup update reverts that scriptmodule, and the symptom is the slider quietly going laggy again.</p>
+        <div class="note warn"><strong>The bar changes width as it fills, and it is the font.</strong> A 16-cell bar is always 16 characters; what varies is rendered width, because the bundled OSD font is proportional. Measured from its <code>hmtx</code> table: <code>'='</code> is 642 units and <code>'-'</code> is 460, so a full bar draws 40% wider than an empty one. That font's only equal-width pairs are <code>#</code>/<code>+</code>, <code>o</code>/<code>0</code> and <code>.</code>/<code>:</code>, none of which read as filled versus empty, and it has no block glyphs at all &mdash; they resolve to <code>.notdef</code> and render as tofu. Point <code>video_font_path</code> at <code>DejaVuSansMono</code>, where every glyph is 602 units and the blocks exist, and build the bar from U+2588 and U+2591. Those are three bytes each, so size the buffers for it.</div>
       </div>
 
       <div class="trap">
@@ -875,6 +925,51 @@ input_player1_btn_b = "8"</code></pre>
     <div class="note"><strong>Not every odd mapping is a bug.</strong> Genesis Plus GX maps Genesis A/B/C onto RetroPad Y/B/A by documented default. It looks wrong on a diamond face and is not — the Genesis pad has three buttons in a row and a four-button diamond cannot reproduce that. Remapping it to "fix" the appearance makes the device disagree with every guide written for it.</div>
   </section>
   <section>
+    <div class="eyebrow">Radio</div>
+    <h2>The aluminium case is a Faraday cage</h2>
+    <p>The aftermarket aluminium shell costs roughly <strong>30&nbsp;dB</strong> &mdash; about a thousandfold in received power. Same access points, same position, same instant, measured against a USB adapter whose antenna sits outside the shell:</p>
+
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Access point</th><th>Band</th><th class="num">Internal</th><th class="num">External</th><th class="num">Delta</th></tr></thead>
+        <tbody>
+          <tr><td>NETGEAR-5G-2</td><td>5&nbsp;GHz</td><td class="num">&minus;82</td><td class="num">&minus;47</td><td class="num">+35 dB</td></tr>
+          <tr><td>NETGEAR-5G-1</td><td>5&nbsp;GHz</td><td class="num">&minus;68</td><td class="num">&minus;38</td><td class="num">+30 dB</td></tr>
+          <tr><td>TheRiverBarn</td><td>2.4&nbsp;GHz</td><td class="num">&minus;75</td><td class="num">&minus;43</td><td class="num">+32 dB</td></tr>
+          <tr><td>ohasit</td><td>5&nbsp;GHz</td><td class="num">&minus;84</td><td class="num">&minus;57</td><td class="num">+27 dB</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>The internal radio heard <strong>4</strong> networks from that spot; the external adapter heard <strong>28</strong>. In practice the shielded link had collapsed to the 802.11b floor &mdash; <code>rx 1.0 / tx 5.5 Mbit/s</code> &mdash; while the external adapter ran <code>135&nbsp;Mbit/s</code> on 5&nbsp;GHz with no loss.</p>
+
+    <p><strong>The uniformity is the proof.</strong> Roughly equal loss on every AP and both bands is what an enclosure does; distance, interference or a weak router all produce a selective pattern. A useful corollary: an aperture blocks wavelengths that are large relative to it, so the longer 2.4&nbsp;GHz waves suffer at least as much as 5&nbsp;GHz. Seeing 5&nbsp;GHz arrive <em>stronger</em> than 2.4&nbsp;GHz from one dual-band router is therefore itself a symptom of an enclosure rather than of distance.</p>
+
+    <h3>Bluetooth sits behind the same shield</h3>
+    <p>On the Pi&nbsp;4 the CYW43455 carries Wi-Fi and Bluetooth on one die, sharing one antenna feed. The addresses give it away:</p>
+<pre><code>wlan0  e4:5f:01:3c:21:36
+hci0   e4:5f:01:3c:21:37   <span class="c"># consecutive - one die, one antenna</span></code></pre>
+    <p>Every dB the case takes from Wi-Fi it takes from Bluetooth too. A pad that pairs on the bench and misbehaves in the case is not necessarily a BlueZ problem &mdash; check the link budget before re-reading the pairing traps above. And no software fix exists: the Pi&nbsp;4B, unlike the CM4, has no U.FL connector, so the antenna cannot be relocated.</p>
+
+    <h3>What actually fixes it</h3>
+    <p>A USB adapter, because its antenna is outside the metal. On a self-maintained kernel the only criterion that matters is in-tree driver support &mdash; anything needing an out-of-tree DKMS module becomes another rebuild on every kernel bump, alongside <code>xpi_gamecon</code>. These are all in-tree:</p>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Chipset</th><th>Driver</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>MT7921AU / MT7925</td><td><code>mt7921u</code>, <code>btmtk</code></td><td>Wi-Fi&nbsp;6 + Bluetooth in one device</td></tr>
+          <tr><td>MT7612U</td><td><code>mt76x2u</code></td><td>Wi-Fi&nbsp;5, mature, no Bluetooth</td></tr>
+          <tr><td>RT2770 / RT3572</td><td><code>rt2800usb</code></td><td>802.11n only; what an ALFA AWUS051NH carries</td></tr>
+          <tr><td>RTL8812AU / 8814AU</td><td colspan="2">out-of-tree &mdash; <strong>avoid</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>A 2011-era AWUS051NH v1 (<code>148f:2770</code>, dual-band, 802.11n) was enough to take this from an unusable link to 135&nbsp;Mbit/s. The bottleneck was never throughput, it was link budget &mdash; so an old adapter with a real antenna beats a modern one sealed in metal.</p>
+    <div class="note"><strong>A short USB extension is worth more than a better adapter.</strong> It moves the antenna away from both the shell and the Pi's USB&nbsp;3 ports, which radiate broadband noise centred on the 2.4&nbsp;GHz band. A nano dongle sitting flush against aluminium recovers much less than the table above suggests.</div>
+    <div class="note warn"><strong>Audit the router while you are here.</strong> Scanning from the Pi found both of this router's 5&nbsp;GHz radios broadcasting with no encryption at all &mdash; no RSN element, no Privacy bit, factory SSIDs &mdash; while the 2.4&nbsp;GHz band was properly secured. Consecutive BSSIDs identify the radios of a single device, and <code>nmcli device wifi list</code> shows a blank <code>SECURITY</code> column for an open one.</div>
+  </section>
+
+  <section>
     <div class="eyebrow">Reference</div>
     <h2>The display: translating the config, and the cadence trap</h2>
     <p>The original ran legacy fkms, where timings were a firmware-parsed string. Under full KMS the same numbers become device-tree properties. This mapping is the core of the port.</p>
@@ -1139,11 +1234,19 @@ kill -TERM "$(pgrep -f "^$ES_BIN")"   <span class="c"># just the binary, not the
     <div class="eyebrow">Open</div>
     <h2>What is not solved</h2>
     <h3>What a real status bar would take</h3>
+    <p><strong>First, why this is hard now and was not before.</strong> Experimental Pi's <code>osd</code> binary drew the volume icon, the clock and the rest as a <em>hardware overlay</em>, through dispmanx:</p>
+<pre><code>vc_dispmanx_display_open      vc_dispmanx_resource_write_data
+vc_dispmanx_element_add       vc_dispmanx_element_change_attributes
+vc_dispmanx_update_submit_sync</code></pre>
+    <p>VideoCore composited that element above whatever was running, so it never involved the frontend or the emulator at all. It polled <code>/sys/kernel/xpi_gamecon/volume</code> in a <code>usleep</code> loop and shelled out to <code>amixer</code> &mdash; cruder than anything here on the mechanics &mdash; but its <em>drawing</em> had no competition. That is why their volume slider was instant and ours had to be fought for.</p>
+    <p>dispmanx exists only under the legacy stack. Theirs ran <code>dtoverlay=vc4-fkms-v3d</code>; this port runs full KMS, which the DPI panel, HDMI hotplug and the backlight classdev all depend on, and under full KMS the firmware display path is bypassed and dispmanx is gone. The modern equivalent is a DRM overlay plane, and only the DRM master may add one &mdash; which is ES or RetroArch, never us. <strong>So the volume OSD and the status bar were never two problems. They were one capability that disappeared.</strong></p>
     <p>A permanent strip over both the frontend and games means running a Wayland compositor (<code>labwc</code>, <code>cage</code>) as DRM master, with ES and RetroArch as clients and a layer-shell bar (<code>waybar</code>, <code>yambar</code>) above them. That is the honest modern equivalent of dispmanx. The blocker is that RetroPie builds RetroArch <strong>without</strong> Wayland:</p>
 <pre><code>retroarch --features
   Wayland  - Wayland input/video drivers: no
   KMS      - Video context driver: yes</code></pre>
     <p>So it is a compositor install, a full RetroArch rebuild from source with Wayland enabled, reworked input routing, and a compositing cost on a 640×480 panel where a 20 px bar is 4% of the screen. Treat it as its own project, with a working image backed up first.</p>
+    <p><strong>There is a cheaper route that is not a compositor.</strong> Patch each client to draw its own bar: EmulationStation already has one written here, and RetroArch renders an in-game FPS overlay every frame through <code>font_driver_render_msg</code>, which a status string can ride. Counting actual libraries on this build, RetroArch cores cover <strong>6235 files against 126 standalone</strong> &mdash; 98%, with only Dreamcast (<code>redream</code>) and a few Z-machine titles outside. It is not a true always-on-top bar: it cannot cover a closed-source standalone emulator, <code>runcommand</code>'s launch screen, or the gap between ES and a game starting. But it is two patches against one compositor, and the RetroArch half is proven &mdash; the <code>SHOW_MSG</code> flush patch above went through exactly that build path.</p>
+
     <p><strong>Back up the binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
 
     <h3>Two unexplained shutdowns — with a strong candidate</h3>
@@ -1156,7 +1259,7 @@ kill -TERM "$(pgrep -f "^$ES_BIN")"   <span class="c"># just the binary, not the
     <p>Everything about the charge path checks out — VBus detection flips cleanly on unplug, the current reading tracks load and source correctly, and the pack demonstrably holds charge. But <code>amps</code> has never once read above zero, because the pack has been full or near-full every time it was measured. Two minutes on battery produces voltage sag, not depletion. Settling it needs a genuine 20&ndash;30 minute discharge followed by a plug-in, and until then it is unproven whether the sensor reports charge current at all or only discharge.</p>
 
     <h3>NeoGeo is blocked by content, not by software</h3>
-    <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The backup restored from Experimental Pi's own card did not contain one either, which means NeoGeo never worked on the original machine. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
+    <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The backup restored from Experimental Pi's own card did not contain one either, which means NeoGeo never worked on the original machine &mdash; since confirmed directly against a partclone image of that card, whose <code>BIOS/</code> directory holds only <code>skip.bin</code>, <code>fast.bin</code> and <code>system.bin</code>. That image is readable without restoring it anywhere: <code>debugfs -R 'cat /path' root.img</code> reads an ext4 image as an ordinary user, no loop mount and no root. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
 
 
     <div class="note warn"><strong>The rail really is low.</strong> <code>avoid_warnings=2</code> restores full speed by suppressing the firmware's <em>reaction</em>, not by fixing the voltage — the XPi's boost output still dips below what the Pi expects. Experimental Pi shipped it this way for years, so it is evidently survivable, but you are running the SoC through those dips. Treat clean shutdowns as mandatory and keep backups current.</div>

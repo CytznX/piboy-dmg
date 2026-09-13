@@ -3,15 +3,30 @@
 # the library per day, and Skyscraper caches everything it fetches, so repeated
 # runs resume rather than restart. Stops scheduling itself once nothing is left.
 set -uo pipefail
-PLATFORMS=(nes megadrive)
+PLATFORMS=(nes megadrive dreamcast)
 
 remaining() {
-    local s=$1 tot got
-    tot=$(find "$HOME/RetroPie/roms/$s" -type f \
-          \( -name '*.nes' -o -name '*.zip' -o -name '*.md' -o -name '*.bin' \
-             -o -name '*.gen' -o -name '*.smd' \) 2>/dev/null | wc -l)
-    got=$(grep -c '<game' "$HOME/RetroPie/roms/$s/gamelist.xml" 2>/dev/null || echo 0)
-    echo $(( tot - got ))
+    local s=$1 dir="$HOME/RetroPie/roms/$s" tot got skip n
+    [ -d "$dir" ] || { echo 0; return; }
+    # Recurse: nes and megadrive keep most of their library in an "Alternate Roms"
+    # subfolder. But skip media/ (scraped artwork, thousands of files) and discs/,
+    # where a multi-disc set keeps its images - the set is counted once via the
+    # top-level .m3u that represents it.
+    tot=$(find "$dir" -type f \
+          -not -path "$dir/media/*" -not -path "$dir/discs/*" \
+          \( -iname '*.nes' -o -iname '*.zip' -o -iname '*.md' -o -iname '*.bin' \
+             -o -iname '*.gen' -o -iname '*.smd' -o -iname '*.chd' \
+             -o -iname '*.m3u' \) 2>/dev/null | wc -l)
+    got=$(grep -c '<game' "$dir/gamelist.xml" 2>/dev/null || echo 0)
+    # ScreenScraper has no data at all for some titles. Skyscraper records them and
+    # skips them on every subsequent run, so counting them as outstanding means the
+    # total never reaches zero and the timer below can never retire itself.
+    skip=0
+    [ -f "$HOME/.skyscraper/skipped-$s-cache.txt" ] &&
+        skip=$(wc -l < "$HOME/.skyscraper/skipped-$s-cache.txt")
+    n=$(( tot - got - skip ))
+    [ "$n" -lt 0 ] && n=0
+    echo "$n"
 }
 
 # Never compete with a game for the CPU - try again tomorrow instead.
@@ -21,9 +36,11 @@ if pgrep -f 'retroarch|redream|/opt/retropie/emulators' >/dev/null; then
 fi
 
 left=0
+todo=()
 for s in "${PLATFORMS[@]}"; do
     n=$(remaining "$s"); left=$((left + n))
     echo "before: $s has $n unscraped"
+    [ "$n" -gt 0 ] && todo+=("$s")
 done
 if [ "$left" -le 0 ]; then
     echo "nothing left to scrape - disabling the timer"
@@ -32,7 +49,7 @@ if [ "$left" -le 0 ]; then
     exit 0
 fi
 
-"$HOME/scrape.sh" "${PLATFORMS[@]}"
+"$HOME/scrape.sh" "${todo[@]}"
 rc=$?
 
 after=0

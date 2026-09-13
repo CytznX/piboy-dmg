@@ -39,8 +39,13 @@ for z in /sys/class/thermal/thermal_zone*; do
 done
 [ -n "$TEMP" ] || TEMP=/sys/class/thermal/thermal_zone0/temp
 
-# millidegrees:duty, high to low. Experimental Pi's osd.cfg bands plus a 100% top band.
-FAN_CURVE="78000:255 75000:191 70000:128 65000:102 60000:77 55000:51 50000:26"
+# millidegrees:duty, high to low. Experimental Pi's osd.cfg bands, steepened above
+# 60C. Theirs held 50% across the whole 70-75C span and only reached full duty at
+# 78C, which left the fan loafing while the SoC climbed: a long scraper run on this
+# board set throttled=0xe0000 (arm capped / throttled / soft-temp-limit occurred).
+# Bands below 60C are unchanged, so idle and light-load noise is exactly as before.
+# Full duty now lands at 75C - roughly 5C of headroom before the Pi 4 throttles.
+FAN_CURVE="75000:255 72000:213 69000:175 66000:140 63000:110 60000:77 55000:51 50000:26"
 FAN_HYST=3500        # measured idle temp swing is ~2400; less than that flaps
 
 BATT_WARN="5 10 15 25"   # low to high; first match wins

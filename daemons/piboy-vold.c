@@ -28,6 +28,8 @@
 #include <math.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <poll.h>
+#include <time.h>
 #include <linux/input.h>
 #include <alsa/asoundlib.h>
 
@@ -39,7 +41,49 @@
  * piboy-fand carries the same constant for its battery warnings. A stale value
  * here fails SILENTLY - both senders ignore every error - so change all three. */
 #define RA_PORT      55355
-#define OSD_CELLS    16          /* slider width, in characters */
+#define OSD_CELLS    16          /* slider width, in cells */
+
+/* Slider glyphs, as explicit UTF-8 bytes rather than \u escapes so the encoding
+ * does not depend on the compiler's execution charset.
+ *
+ * These MUST be equal width or the bar changes length as it fills. RetroArch's
+ * bundled OSD font is proportional - '=' is 642 units and '-' is 460, so a full
+ * bar rendered 40% wider than an empty one. retroarch.cfg therefore points
+ * video_font_path at DejaVuSansMono, where every glyph is 602 units, and that
+ * font also carries these block characters (the bundled one does not - they
+ * would render as tofu). Both facts were measured from the hmtx tables.
+ *
+ * If the font ever goes missing RetroArch falls back to its bundled one and
+ * these become boxes, which is a loud failure rather than a silent one. */
+#define OSD_FILL     "\xE2\x96\x88"   /* U+2588 FULL BLOCK  */
+#define OSD_EMPTY    "\xE2\x96\x91"   /* U+2591 LIGHT SHADE */
+/* OSD pacing, milliseconds.
+ *
+ * These defaults assume RetroArch carries patches/retroarch-showmsg-flush.patch,
+ * which makes SHOW_MSG replace the pending notification instead of queueing
+ * behind it. With that patch a redraw costs nothing, so the slider tracks the
+ * wheel live: QUIET is only the settling delay for the final frame, and MIN=0
+ * means draw on every event (~25/s while turning).
+ *
+ * WITHOUT that patch these values are wrong and the display will lag by many
+ * seconds. Stock RetroArch holds each message 180 frames - three seconds - and
+ * shows them strictly in turn, with no duration setting, so anything above one
+ * push per three seconds builds a backlog. Coalescing to 8/s was tried and was
+ * still far too fast. On stock RetroArch use QUIET=150 MIN=3500, which draws a
+ * single frame once the wheel settles.
+ *
+ * Both are overridable at runtime via PIBOY_OSD_QUIET_MS and PIBOY_OSD_MS. */
+#define OSD_QUIET_MS_DEFAULT  50
+#define OSD_MIN_MS_DEFAULT     0
+static long osd_quiet_ms = OSD_QUIET_MS_DEFAULT;
+static long osd_min_ms   = OSD_MIN_MS_DEFAULT;
+
+static long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+}
 
 static volatile sig_atomic_t running = 1;
 static void on_signal(int sig) { (void)sig; running = 0; }
@@ -128,9 +172,16 @@ static void osd_open(void)
     osd_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 }
 
+/* Both glyphs must be the same byte length or the bar loses alignment. */
+_Static_assert(sizeof OSD_FILL == sizeof OSD_EMPTY, "slider glyphs differ in length");
+
 static void osd_show(int wheel)
 {
-    char msg[64], bar[OSD_CELLS + 1];
+    /* Both glyphs are three bytes, so the bar is a fixed 3 per cell. sizeof on
+     * a string literal counts its NUL, hence the -1. */
+    enum { GLYPH = (int)(sizeof OSD_FILL) - 1 };
+    char msg[160], bar[OSD_CELLS * 3 + 1];
+    char *p = bar;
     int i, filled;
 
     if (osd_fd < 0)
@@ -140,9 +191,11 @@ static void osd_show(int wheel)
      * loop bound is OSD_CELLS, not filled, so an out-of-range wheel saturates
      * the bar instead of running off it - no clamp needed here. */
     filled = (wheel * OSD_CELLS + 50) / 100;
-    for (i = 0; i < OSD_CELLS; i++)
-        bar[i] = i < filled ? '=' : '-';
-    bar[OSD_CELLS] = '\0';
+    for (i = 0; i < OSD_CELLS; i++) {
+        memcpy(p, i < filled ? OSD_FILL : OSD_EMPTY, GLYPH);
+        p += GLYPH;
+    }
+    *p = '\0';
 
     if (wheel <= MUTE_BELOW)
         snprintf(msg, sizeof msg, "SHOW_MSG Volume [%s] MUTE", bar);
@@ -238,6 +291,25 @@ int main(void)
         return 1;
     }
 
+    {
+        static const struct { const char *name; long *slot; } knobs[] = {
+            { "PIBOY_OSD_QUIET_MS", &osd_quiet_ms },
+            { "PIBOY_OSD_MS",       &osd_min_ms   },
+        };
+        for (size_t i = 0; i < sizeof knobs / sizeof knobs[0]; i++) {
+            const char *e = getenv(knobs[i].name);
+            char *end;
+            long v;
+            if (!e || !*e)
+                continue;
+            v = strtol(e, &end, 10);
+            if (*end == '\0' && v >= 0 && v <= 60000)
+                *knobs[i].slot = v;
+            else
+                fprintf(stderr, "piboy-vold: ignoring %s='%s'\n", knobs[i].name, e);
+        }
+    }
+
     osd_open();
 
     /* Seed from the current wheel position rather than waiting for a turn.
@@ -246,26 +318,64 @@ int main(void)
     if (ioctl(fd, EVIOCGABS(ABS_VOLUME), &abs) >= 0)
         apply(abs.value);
 
-    while (running) {
-        ssize_t n = read(fd, &ev, sizeof(ev));   /* blocks; kernel fuzz filters */
+    {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        long last_draw = 0;            /* monotonic ms of the last OSD frame */
+        int  pending = 0, pending_val = 0;
 
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;              /* signal arrived; loop re-checks running */
-            fprintf(stderr, "piboy-vold: read failed: %s\n", strerror(errno));
-            break;
-        }
-        if (n != sizeof(ev)) {         /* short/zero read: errno is NOT meaningful here */
-            fprintf(stderr, "piboy-vold: short read (%zd bytes)\n", n);
-            break;                     /* never `continue` - that is a 100%% CPU spin */
-        }
-        snd_mixer_handle_events(mixer);   /* pick up changes made by others */
-        if (ev.type == EV_ABS && ev.code == ABS_VOLUME) {
-            /* Draw before apply(): the curve maps several wheel steps onto one
-             * percent, and apply() returns early on those - but a slider that
-             * freezes while the wheel is visibly turning reads as broken. */
-            osd_show(ev.value);
-            apply(ev.value);
+        while (running) {
+            /* Wait only while a frame is owed; otherwise block indefinitely,
+             * so an idle wheel costs exactly nothing. */
+            int timeout = pending ? (int)osd_quiet_ms : -1;
+
+            int pr = poll(&pfd, 1, timeout);
+            if (pr < 0) {
+                if (errno == EINTR)
+                    continue;          /* signal arrived; loop re-checks running */
+                fprintf(stderr, "piboy-vold: poll failed: %s\n", strerror(errno));
+                break;
+            }
+            if (pr == 0) {
+                /* The wheel has been still for osd_quiet_ms: this is the
+                 * single frame for this adjustment, showing the value it
+                 * actually came to rest on. */
+                if (pending) {
+                    osd_show(pending_val);
+                    last_draw = now_ms();
+                    pending = 0;
+                }
+                continue;
+            }
+
+            ssize_t n = read(fd, &ev, sizeof(ev));
+            if (n < 0) {
+                if (errno == EINTR || errno == EAGAIN)
+                    continue;
+                fprintf(stderr, "piboy-vold: read failed: %s\n", strerror(errno));
+                break;
+            }
+            if (n != sizeof(ev)) {     /* short/zero read: errno is NOT meaningful here */
+                fprintf(stderr, "piboy-vold: short read (%zd bytes)\n", n);
+                break;                 /* never `continue` - that is a 100%% CPU spin */
+            }
+            snd_mixer_handle_events(mixer);   /* pick up changes made by others */
+            if (ev.type == EV_ABS && ev.code == ABS_VOLUME) {
+                /* Volume on EVERY event - the audio must track the hand. */
+                apply(ev.value);
+
+                /* Hold the frame. The poll timeout below restarts on every
+                 * event, so it only expires once the wheel has actually been
+                 * still for osd_quiet_ms - that is the moment worth drawing. */
+                pending     = 1;
+                pending_val = ev.value;
+
+                /* Backstop for a turn so slow it never falls quiet. */
+                if (now_ms() - last_draw >= osd_min_ms) {
+                    osd_show(ev.value);
+                    last_draw = now_ms();
+                    pending   = 0;
+                }
+            }
         }
     }
 

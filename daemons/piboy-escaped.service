@@ -4,9 +4,12 @@ After=multi-user.target
 
 [Service]
 Type=simple
-# The flags node is 0660 root:root and this unit runs as the console user, so
+# Both panel nodes are root-owned and this unit runs as the console user, so
 # hand it group write. `+` runs these as root regardless of User= below.
-ExecStartPre=+/bin/sh -c 'chgrp input /sys/kernel/xpi_gamecon/flags 2>/dev/null; chmod 0660 /sys/kernel/xpi_gamecon/flags 2>/dev/null; true'
+# bl_power is the one that matters - it touches the panel bit alone. flags is
+# the fallback for a driver without the backlight class, and is only safe
+# because the daemon read-modify-writes bit 0 rather than the whole byte.
+ExecStartPre=+/bin/sh -c 'for n in /sys/class/backlight/piboy/bl_power /sys/kernel/xpi_gamecon/flags; do [ -e "$n" ] && { chgrp input "$n"; chmod 0660 "$n"; }; done 2>/dev/null; true'
 ExecStart=/usr/local/sbin/piboy-escaped
 # Restore the panel on ANY exit, including a crash or SIGKILL that never reaches
 # the daemon's own cleanup. This is why no polling watchdog is needed: systemd
@@ -22,7 +25,7 @@ Restart=on-failure
 RestartSec=5
 # Runs as the console user, not root: the emulators it must signal are that
 # user's processes, and reading /dev/input needs only the input group.
-User=$PI_USER
+User=cytzenx
 SupplementaryGroups=input
 Nice=5
 
