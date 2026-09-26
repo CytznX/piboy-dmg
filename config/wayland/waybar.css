@@ -1,0 +1,106 @@
+/* PiBoy DMG status bar, themed to match EmulationStation's gbz35.
+ *
+ * WHAT "MATCH ES" MEANT HERE. gbz35's own furniture - the system-name band and
+ * the help bar along the bottom - is a WHITE TRANSLUCENT panel (FFFFFF99 /
+ * FFFFFFaa in theme.xml) carrying dark text, in Roboto. Its colour comes from
+ * per-system background art, not from the theme XML, so it changes with the
+ * system you are browsing and there is no single accent to borrow. Matching the
+ * furniture rather than the artwork is therefore the only thing that holds up
+ * across all of them: this bar is deliberately the same white panel as the help
+ * bar at the bottom of the screen, so the two bookend the display.
+ *
+ * Roboto Condensed is the theme's own face (_inc/fonts/RobotoCondensed-Regular)
+ * and is packaged system-wide, so this is ES's actual typeface, not a lookalike.
+ * Condensed also buys the width to fit seven modules on a 640px panel.
+ *
+ * FontAwesome leads the stack so the glyphs in waybar.json resolve; the
+ * U+2581..2588 CPU ramp falls through to DejaVu. */
+
+* {
+    font-family: "FontAwesome", "Roboto Condensed", "DejaVu Sans", sans-serif;
+    font-size: 13px;
+    /* GTK gives widgets a minimum height that stops the bar honouring
+     * `height` in waybar.json. Zero it or the pills get clipped. */
+    min-height: 0;
+}
+
+window#waybar {
+    /* FFFFFFaa is the help bar's own value, straight from gbz35's theme.xml. */
+    background: rgba(255, 255, 255, 0.67);
+    color: #000000;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.18);
+}
+
+#clock,
+#network,
+#cpu,
+#memory,
+#disk,
+#temperature,
+#battery {
+    padding: 0 7px;
+    margin: 2px 1px;
+    border-radius: 9px;
+    color: #ffffff;
+}
+
+/* Resting colours: muted and slightly desaturated, so they read as a set
+ * against gbz35's pastel system art rather than fighting it. Distinct hues,
+ * because colour is what lets you find one number without reading all seven. */
+#clock       { background: #2d6a8e; }   /* blue       */
+#network     { background: #417b5a; }   /* green      */
+#cpu         { background: #6d597a; }   /* mauve      */
+#memory      { background: #355070; }   /* indigo     */
+#disk        { background: #5c6b73; }   /* slate      */
+#temperature { background: #a15c38; }   /* terracotta */
+#battery     { background: #3a7d44; }   /* forest     */
+
+/* States. waybar adds these classes itself from `critical-threshold` and
+ * `states` in waybar.json, so the thresholds live there and the appearance
+ * lives here. Amber carries dark text; every red carries white. */
+#network.disconnected,
+#temperature.critical,
+#memory.critical,
+#disk.critical {
+    background: #c01c28;
+}
+
+#memory.warning,
+#disk.warning {
+    background: #e5a50a;
+    color: #241f00;
+}
+
+#battery.charging {
+    background: #2ec27e;
+    color: #06281a;
+}
+
+#battery.warning:not(.charging) {
+    background: #e5a50a;
+    color: #241f00;
+}
+
+/* Critical battery pulses. This is the one thing on the bar worth interrupting
+ * you for - piboy-batd powers the device off a few percent below here - and a
+ * static red pill is easy to miss on a screen full of box art.
+ *
+ * It pulses between two DARK reds and the text colour is deliberately NOT
+ * animated. The first version of this animated background toward white and
+ * text toward red; a screenshot caught it mid-cycle with both the same shade
+ * and the percentage completely illegible - at precisely the moment it has to
+ * be readable. GTK interpolates even with `steps(2)`. Every frame between
+ * these two keeps white text legible.
+ *
+ * Costs a repaint while it runs, and only below 10%. */
+@keyframes pulse-critical {
+    to {
+        background-color: #7a0a10;
+    }
+}
+
+#battery.critical:not(.charging) {
+    background: #c01c28;
+    color: #ffffff;
+    animation: pulse-critical 1s ease-in-out infinite alternate;
+}

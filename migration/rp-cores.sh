@@ -4,8 +4,8 @@
 # Resumable by design: each package is installed independently, and already-built
 # ones are skipped on a re-run. If power is lost mid-build we keep everything that
 # finished, and restarting picks up where it stopped.
-cd $HOME/RetroPie-Setup || exit 1
-LOG=$HOME/rp-cores.log
+cd /home/cytzenx/RetroPie-Setup || exit 1
+LOG=/home/cytzenx/rp-cores.log
 exec > >(tee -a "$LOG") 2>&1
 
 # system : package     (only systems with actual ROMs in the backup)

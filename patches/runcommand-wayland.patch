@@ -1,0 +1,116 @@
+--- /home/cytzenx/RetroPie-Setup/scriptmodules/supplementary/runcommand/runcommand.sh.pre-wayland	2026-09-25 18:41:43.612791099 -0400
++++ /home/cytzenx/RetroPie-Setup/scriptmodules/supplementary/runcommand/runcommand.sh	2026-09-25 20:48:47.005507562 -0400
+@@ -77,6 +77,37 @@
+ ## pressed the GUI is shown, where a user can set video modes, default emulators
+ ## and other options (depending what is being launched).
+ 
++# PiBoy DMG / Wayland: restore the pre-launch configure menu.
++#
++# Under a compositor this script has no controlling terminal, which breaks the
++# menu two ways at once: the key read gets EOF instead of a keypress, and dialog
++# would draw onto the VT that labwc is covering, so it would be invisible even
++# if it could be reached. Re-exec the whole script inside a Wayland terminal,
++# which supplies a pty - /dev/tty becomes a real device, the key read works, and
++# the menu is visible. The emulator then opens its own Wayland window on top,
++# and the terminal closes when it exits.
++#
++# The terminal itself is opened by foot-run.sh, so the flags that make dialog
++# usable here (--term, because foot's own terminfo is not installed) live in one
++# file this project owns rather than in a patch against a third-party script.
++#
++# The guards stay HERE, though, and are not delegated: foot-run.sh refuses with
++# exit 2 when it cannot get a terminal, which is right for the configuration
++# menu but wrong for this script - a game must still launch without one. So the
++# conditions are tested up front and we simply fall through when any of them
++# fails, into the TTY_IN safety net further down. RUNCOMMAND_IN_TERM stops the
++# re-exec recursing; on a KMS boot /dev/tty is real and none of this runs.
++#
++# Reapply from piboy-dmg/patches/runcommand-wayland.patch after a
++# RetroPie-Setup update.
++FOOT_RUN="/opt/retropie/configs/all/wayland/foot-run.sh"
++if [[ -n "$WAYLAND_DISPLAY" && -z "$RUNCOMMAND_IN_TERM" ]] \
++   && ! { : </dev/tty; } 2>/dev/null \
++   && command -v foot >/dev/null && [[ -x "$FOOT_RUN" ]]; then
++    export RUNCOMMAND_IN_TERM=1
++    exec "$FOOT_RUN" "$0" "$@"
++fi
++
+ ROOTDIR="/opt/retropie"
+ CONFIGDIR="$ROOTDIR/configs"
+ LOG="/dev/shm/runcommand.log"
+@@ -1268,7 +1299,7 @@
+             # otherwise the menu will not be triggered due to terminal being out of focus
+             [[ "$LEGACY_JOY2KEY" -eq 0 && "DISABLE_MENU" -ne 1 ]] && kill -SIGINT "$IMG_PID"
+         else
+-            fbi -1 -t "$IMAGE_DELAY" -noverbose -a "$image" </dev/tty &>/dev/null
++            fbi -1 -t "$IMAGE_DELAY" -noverbose -a "$image" <"$TTY_IN" &>/dev/null
+         fi
+     elif [[ "$DISABLE_MENU" -ne 1 && "$USE_ART" -ne 1 ]]; then
+         local launch_name
+@@ -1281,10 +1312,42 @@
+     fi
+ }
+ 
++# PiBoy DMG / Wayland: under a compositor there is no controlling terminal.
++# labwc detaches from the VT, so EmulationStation runs with tty "?" and every
++# child inherits that - opening /dev/tty then fails with ENXIO. That breaks two
++# things below: the "press a button to configure" key read, and, fatally, the
++# emulator launch itself, which redirects stdin from /dev/tty. With no fallback
++# nothing launches at all under Wayland.
++#
++# This is now only the SAFETY NET. The block near the top of this script
++# re-execs into a Wayland terminal when one is available, which supplies a pty
++# and makes /dev/tty real - so the pre-launch menu works normally under Wayland
++# (verified: visible, readable, and navigable with the d-pad via joy2key).
++# TTY_IN only falls back to /dev/null if that re-exec did not happen, e.g. foot
++# is not installed; games then still launch, just with no configure menu.
++# Under a normal KMS boot /dev/tty is present and behaviour is unchanged.
++#
++# Only the INPUT redirections are routed through TTY_IN. The seven remaining
++# `>/dev/tty` output redirections are all inside main_menu, choose_mode,
++# choose_emulator, choose_render_res and user_menu - reached only after
++# check_menu sees a keypress. In the fallback path check_menu reads from
++# /dev/null, gets EOF immediately, and none of them is reachable; in the foot
++# path /dev/tty is a real pty and they work as written. So they need no
++# fallback, and giving them one would only add a way to write a menu to
++# /dev/null. Re-check this if check_menu ever gains another caller.
++#
++# Reapply from piboy-dmg/patches/runcommand-wayland.patch after a
++# RetroPie-Setup update.
++if { : </dev/tty; } 2>/dev/null; then
++    TTY_IN="/dev/tty"
++else
++    TTY_IN="/dev/null"
++fi
++
+ function check_menu() {
+     local dont_launch=0
+     # check for key pressed to enter configuration
+-    IFS= read -s -t 2 -N 1 key </dev/tty
++    IFS= read -s -t 2 -N 1 key <"$TTY_IN"
+     if [[ -n "$key" ]]; then
+         [[ -n "$IMG_PID" ]] && kill -SIGINT "$IMG_PID"
+         tput cnorm
+@@ -1300,7 +1363,7 @@
+ function user_script() {
+     local script="$CONFIGDIR/all/$1"
+     if [[ -f "$script" ]]; then
+-        bash "$script" "$SYSTEM" "$EMULATOR" "$ROM" "$COMMAND" </dev/tty 2>>"$LOG"
++        bash "$script" "$SYSTEM" "$EMULATOR" "$ROM" "$COMMAND" <"$TTY_IN" 2>>"$LOG"
+     fi
+ }
+ 
+@@ -1322,11 +1385,11 @@
+     if [[ "$CONSOLE_OUT" -eq 1 ]]; then
+         # turn cursor on
+         tput cnorm
+-        eval "$COMMAND" </dev/tty 2>>"$LOG"
++        eval "$COMMAND" <"$TTY_IN" 2>>"$LOG"
+         ret=$?
+         tput civis
+     else
+-        eval "$COMMAND" </dev/tty &>>"$LOG"
++        eval "$COMMAND" <"$TTY_IN" &>>"$LOG"
+         ret=$?
+     fi
+     return $ret

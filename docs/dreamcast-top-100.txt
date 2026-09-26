@@ -1,0 +1,24 @@
+--- TOP 100 SEGA DREAMCAST GAMES
+
+Rankings from: https://gamefaqs.gamespot.com/boards/916412-dreamcast/66221224
+Thread title:  "The Top 100 Dreamcast Games of All-Time"
+
+*** PARTIAL RECOVERY - ENTRIES 05-100 ARE MISSING ***
+
+The original file (112 lines) lived at
+  ~/RetroPie/roms/dreamcast/--- TOP 100 SEGA DREAMCAST GAMES/
+and was deleted on 2026-08-26. The backup meant to protect it was never
+created: tar parsed the leading "---" of the folder name as a command-line
+option and aborted, and the delete ran without checking tar's exit status.
+
+Only what had already been printed to screen survives:
+
+01. SoulCalibur
+02. NFL 2K2
+03. Unreal Tournament
+04. Gunbird 2
+05. ...through 100 - not recovered
+
+Re-fetching failed two ways: GameFAQs returns HTTP 403 to automated requests,
+and search results carry the thread title but not its body. Open the URL above
+in a browser and save the post to restore the rest.

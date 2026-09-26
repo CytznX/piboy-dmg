@@ -1,0 +1,82 @@
+{
+  "//": "PiBoy DMG status bar. See waybar.css for the colours and the ES theme match.",
+
+  "//layer": "overlay, NOT top. wlroots raises a fullscreen window above the top layer, so a bar on `top` is configured correctly, logs the right geometry, and is completely invisible over a running game. This costs direct scanout - labwc composites every frame - which is a known, accepted tradeoff.",
+  "layer": "overlay",
+  "position": "top",
+  "height": 24,
+  "spacing": 2,
+
+  "//exclusive": "FALSE, and this one is load-bearing. It defaults to TRUE, which asks the compositor to reserve the bar's 24px out of the output's usable area. Every other window is then resized to fit - including a FULLSCREEN EMULATOR - so showing or hiding the bar mid-game reconfigures the game's surface underneath it. RetroArch does not survive that: it commits a frame, waits for a wl_surface.frame callback that never arrives, and blocks in poll() forever. Observed as a hard freeze with retroarch at 0.5% CPU (30% when healthy), labwc at 0.0%, and labwc logging `[ERROR] [../src/xdg.c:639] cannot set size 0x0`. With exclusive off the bar simply draws on top and no other window's geometry ever changes - which is also exactly how it already looked, since `layer: overlay` puts it above everything anyway.",
+  "exclusive": false,
+
+  "//layout": "Seven modules on a 640px panel, so formats are terse and the font is condensed. Status that CHANGES sits right, where the eye already goes for the battery; identity (time, link) sits left.",
+  "modules-left": ["clock", "network"],
+  "modules-right": ["cpu", "memory", "disk", "temperature", "battery"],
+
+  "//icons": "\\uXXXX escapes are Font Awesome 4.7 (Debian fonts-font-awesome, family 'FontAwesome' - the version string says 5.0.10 but it ships 4.7). Written as JSON escapes rather than literal UTF-8 so this file stays ASCII and greppable. The cpu ramp is U+2581..2588 block elements, which DejaVu already had - no font needed for those.",
+
+  "//tooltips": "Off everywhere: there is no pointer on this device, so a tooltip can only ever be an accident.",
+
+  "clock": {
+    "format": "  {:%H:%M}",
+    "tooltip": false
+  },
+
+  "//network": "No `interface` set, so this follows the DEFAULT ROUTE - which is what you actually want to know. Both interfaces are up on this device (eth0 metric 100, wlan0 metric 600), so it normally reports the wired link and falls back to wifi if the cable is pulled. Icons: plug for wired, wifi fan for wireless, broken chain for neither.",
+  "network": {
+    "format-ethernet": "  eth",
+    "format-wifi": "  {signalStrength}%",
+    "format-linked": "  ...",
+    "format-disconnected": "  --",
+    "interval": 30,
+    "tooltip": false
+  },
+
+  "cpu": {
+    "format": " {icon} {usage}%",
+    "format-icons": ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"],
+    "//interval": "30s, not the 10s default: this is a handheld and the bar is glanced at, not watched. 10s cost 8,640 wakeups/day per module.",
+    "interval": 30,
+    "tooltip": false
+  },
+
+  "//memory": "8GB on this board and RetroPie barely touches it, so this is a reassurance readout, not a thing to watch - hence the slow interval. states drive the CSS classes if something ever does leak.",
+  "memory": {
+    "format": "  {percentage}%",
+    "states": { "warning": 80, "critical": 92 },
+    "interval": 60,
+    "tooltip": false
+  },
+
+  "//disk": "Root, the 938G card. Moves only when roms are added, so 300s is generous already. The warning matters: a full card corrupts saves silently.",
+  "disk": {
+    "path": "/",
+    "format": "  {percentage_used}%",
+    "states": { "warning": 85, "critical": 95 },
+    "interval": 300,
+    "tooltip": false
+  },
+
+  "temperature": {
+    "//thermal-zone": "0 is cpu-thermal on this board - verified, it is the only zone present. piboy-fand resolves by type instead because it acts on the value; this only displays it.",
+    "thermal-zone": 0,
+    "critical-threshold": 75,
+    "format": "{icon}  {temperatureC}°",
+    "format-icons": ["", "", ""],
+    "interval": 30,
+    "tooltip": false
+  },
+
+  "battery": {
+    "bat": "xpi-battery",
+    "//states": "Drive the .warning/.critical CSS classes. piboy-batd powers the device off near 3%, so critical at 10% is a real warning with time to act, not a death rattle.",
+    "states": { "warning": 20, "critical": 10 },
+    "format": "{icon}  {capacity}%",
+    "format-charging": " {icon}  {capacity}%",
+    "format-icons": ["", "", "", "", ""],
+    "//interval": "60s, NOT 300. waybar's battery module POLLS; it does not wake on the driver's uevent (verified: forcing capacity_override low left the bar reading the stale value). At 300s the .critical pulse could appear up to five minutes late, and piboy-batd powers the device off at ~3%, so the warning could arrive after the shutdown.",
+    "interval": 60,
+    "tooltip": false
+  }
+}

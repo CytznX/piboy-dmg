@@ -11,7 +11,8 @@
  * instead put through Experimental Pi's own logarithmic curve, recovered from
  * their osd binary; the bottom of the travel mutes outright (see apply()).
  *
- * Turning the wheel also draws a slider in the running game, which is what
+ * Turning the wheel publishes the position to VOL_FILE, which RetroArch's
+ * patched status bar reads and displays - the modern stand-in for what
  * Experimental Pi's osd.cfg called "volumeicon" (see osd_show()).
  *
  * cc -O2 -o piboy-vold piboy-vold.c -lasound -lm
@@ -26,8 +27,6 @@
 #include <dirent.h>
 #include <signal.h>
 #include <math.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <poll.h>
 #include <time.h>
 #include <linux/input.h>
@@ -40,7 +39,15 @@
 /* Must match network_cmd_port in retroarch.cfg, which is the real authority.
  * piboy-fand carries the same constant for its battery warnings. A stale value
  * here fails SILENTLY - both senders ignore every error - so change all three. */
-#define RA_PORT      55355
+/* The volume readout now lives in RetroArch's status bar rather than a
+ * notification, so the wheel position is published here and the bar picks it
+ * up. A notification was the wrong vehicle: menu_enable_widgets (which the
+ * status bar requires) renders them as pop-up cards, and a control that moves
+ * 25 times a second should not be firing pop-ups.
+ *
+ * tmpfs, so this costs no card writes. Mode 0644 because RetroArch runs as the
+ * desktop user and only needs to read it. */
+#define VOL_FILE     "/run/piboy-volume"
 #define OSD_CELLS    16          /* slider width, in cells */
 
 /* Slider glyphs, as explicit UTF-8 bytes rather than \u escapes so the encoding
@@ -158,54 +165,29 @@ static int mixer_open(void)
  * ICMP port-unreachable that a closed loopback port returns and then fails
  * every OTHER send with ECONNREFUSED (measured). That would blank half the
  * slider updates in the moment RetroArch starts listening. */
-static int osd_fd = -1;
-static struct sockaddr_in osd_addr;
-
-static void osd_open(void)
-{
-    osd_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
-    if (osd_fd < 0)
-        return;
-    memset(&osd_addr, 0, sizeof osd_addr);
-    osd_addr.sin_family      = AF_INET;
-    osd_addr.sin_port        = htons(RA_PORT);
-    osd_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-}
-
-/* Both glyphs must be the same byte length or the bar loses alignment. */
-_Static_assert(sizeof OSD_FILL == sizeof OSD_EMPTY, "slider glyphs differ in length");
-
 static void osd_show(int wheel)
 {
-    /* Both glyphs are three bytes, so the bar is a fixed 3 per cell. sizeof on
-     * a string literal counts its NUL, hence the -1. */
-    enum { GLYPH = (int)(sizeof OSD_FILL) - 1 };
-    char msg[160], bar[OSD_CELLS * 3 + 1];
-    char *p = bar;
-    int i, filled;
+    char  buf[8];
+    int   fd, n;
+    ssize_t w;
 
-    if (osd_fd < 0)
+    if (wheel < 0)   wheel = 0;
+    if (wheel > 100) wheel = 100;
+
+    n = snprintf(buf, sizeof buf, "%d\n", wheel);
+    if (n <= 0)
         return;
 
-    /* Round to nearest cell so the bar reaches both ends of its travel. The
-     * loop bound is OSD_CELLS, not filled, so an out-of-range wheel saturates
-     * the bar instead of running off it - no clamp needed here. */
-    filled = (wheel * OSD_CELLS + 50) / 100;
-    for (i = 0; i < OSD_CELLS; i++) {
-        memcpy(p, i < filled ? OSD_FILL : OSD_EMPTY, GLYPH);
-        p += GLYPH;
-    }
-    *p = '\0';
-
-    if (wheel <= MUTE_BELOW)
-        snprintf(msg, sizeof msg, "SHOW_MSG Volume [%s] MUTE", bar);
-    else
-        snprintf(msg, sizeof msg, "SHOW_MSG Volume [%s] %3d%%", bar, wheel);
-
-    /* strlen, not snprintf's return: that reports what WOULD have been written,
-     * so a future longer format would send past the end of msg. */
-    (void)sendto(osd_fd, msg, strlen(msg), MSG_DONTWAIT,
-                 (struct sockaddr *)&osd_addr, sizeof osd_addr);
+    /* O_TRUNC, not append: only the latest position matters, and the reader
+     * keys on this file's mtime to decide whether the wheel is being turned
+     * right now. Failure is silent by design - a missing status bar must never
+     * interfere with actually setting the volume. */
+    fd = open(VOL_FILE, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return;
+    w = write(fd, buf, (size_t)n);
+    (void)w;
+    close(fd);
 }
 
 /* Wheel 0..100 -> mixer percent on the RAW volume range.
@@ -310,7 +292,6 @@ int main(void)
         }
     }
 
-    osd_open();
 
     /* Seed from the current wheel position rather than waiting for a turn.
      * Nothing is drawn: nobody asked for the volume, so nothing should appear

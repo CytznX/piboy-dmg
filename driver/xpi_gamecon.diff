@@ -1,5 +1,5 @@
---- /tmp/claude-1000/-home-mseifert-Dropbox-piboy-dmg/1da229e8-7e98-41b2-b3a8-5cd74675c8b9/scratchpad/xpi_gamecon.c.orig	2026-08-22 20:05:42.706977268 -0400
-+++ /tmp/claude-1000/-home-mseifert-Dropbox-piboy-dmg/1da229e8-7e98-41b2-b3a8-5cd74675c8b9/scratchpad/xpi_gamecon.c	2026-08-23 00:42:38.084070631 -0400
+--- xpi_gamecon.c.orig	2026-08-22 20:05:42.706977268 -0400
++++ xpi_gamecon.c	2026-08-23 00:42:38.084070631 -0400
 @@ -3,9 +3,23 @@
  #include <linux/of_device.h>
  #include <linux/module.h>

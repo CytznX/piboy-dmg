@@ -9,8 +9,8 @@
 # errors and a non-zero exit that hides real problems.
 set -euo pipefail
 
-PI="$PI_USER@$PI_HOST"
-KEY="$SSH_KEY"
+PI=cytzenx@10.1.1.32
+KEY=/home/mseifert/.ssh/id_ed25519
 TGT=/mnt/tgt
 SSH="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 

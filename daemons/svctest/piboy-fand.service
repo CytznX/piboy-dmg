@@ -1,0 +1,21 @@
+[Unit]
+Description=PiBoy DMG fan curve and status policy
+After=systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/piboy-fand
+# The script exits 1 if the xpi_gamecon sysfs tree is not there yet; Restart
+# retries until the module is loaded. A ConditionPathExists would instead make
+# systemd *skip* the unit on a boot race, and Restart never applies to a unit
+# that was never started.
+Restart=always
+RestartSec=5
+# Without a start limit, exit-1 + RestartSec=5 respawns forever if the module
+# never loads (2 starts per 10s never trips the default burst of 5).
+StartLimitIntervalSec=120
+StartLimitBurst=10
+SyslogIdentifier=piboy-fand
+
+[Install]
+WantedBy=multi-user.target

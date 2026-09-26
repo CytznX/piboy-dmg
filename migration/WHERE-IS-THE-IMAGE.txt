@@ -1,0 +1,33 @@
+The captured Experimental Pi's image is NOT in Dropbox - it is 24 GB and would sync to the cloud.
+
+    /home/mseifert/.local/share/piboy-backup-image/
+        boot.pcl.zstd    39M   partclone.vfat  + zstd
+        root.pcl.zstd    23G   partclone.ext4  + zstd
+        MANIFEST.txt           sha256 sums (copy; the original is here in migration/)
+
+Restore needs a target partition >= 939G. partition-table.sfdisk in this
+directory reproduces the original layout - replay it verbatim rather than
+inventing one, or partclone will refuse to restore into a smaller p2.
+
+This is currently the ONLY copy of THIS PARTICULAR CARD - our unit, our ROMs, our
+settings - and it lives on one laptop disk. That is not a backup. Copy it to
+external media.
+
+It is no longer the only copy of Experimental Pi's build in general. Their whole
+download server survives at https://archive.org/details/EXPPI, and the four OS
+images from it are now alongside, retrieved 2026-09-25:
+
+    /home/mseifert/.local/share/piboy-backup-image/exppi-archive/
+        PiBoy_DMG_1.0.7.img.xz                  808M  the stock DMG image
+        Piboy_XRS_1.0.7.img.xz                  994M
+        Lakka-RPi4-PiBoyDmg.aarch64-5.0.img.gz  1.1G  64-bit, predates our port
+        recalbox-rpi4_64.img.xz                 1.2G  64-bit
+        MANIFEST.txt                                  md5 + sha256
+
+Size and md5 of all four were verified against archive.org's own metadata on
+download. The smaller files from the same item - Windows utility, MCU firmware,
+STLs, USB driver - are small enough to sync and live in the repo, under
+docs/experimentalpi-mirror/downloads/.
+
+PiBoy_DMG_1.0.7.img.xz is the stock vendor image, not our card: no ROMs, none of
+our configuration. It is the baseline to diff against, not a restore target.

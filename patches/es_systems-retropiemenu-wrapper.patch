@@ -1,0 +1,11 @@
+--- /home/cytzenx/es_systems.cfg.pre-menuwrapper	2026-09-25 19:50:01.795986226 -0400
++++ /etc/emulationstation/es_systems.cfg	2026-09-25 19:50:02.277672750 -0400
+@@ -239,7 +239,7 @@
+     <fullname>RetroPie</fullname>
+     <path>/home/cytzenx/RetroPie/retropiemenu</path>
+     <extension>.rp .sh</extension>
+-    <command>sudo /home/cytzenx/RetroPie-Setup/retropie_packages.sh retropiemenu launch %ROM% </command>
++    <command>/opt/retropie/configs/all/wayland/retropiemenu-launch.sh %ROM% </command>
+     <platform/>
+     <theme>retropie</theme>
+   </system>

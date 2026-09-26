@@ -1,0 +1,27 @@
+--- /home/cytzenx/RetroPie-Setup/scriptmodules/emulators/retroarch.sh.pre-wayland	2026-09-25 14:57:07.726173675 -0400
++++ /home/cytzenx/RetroPie-Setup/scriptmodules/emulators/retroarch.sh	2026-09-25 14:57:07.726483655 -0400
+@@ -22,6 +22,8 @@
+     isPlatform "mesa" && depends+=(libx11-xcb-dev)
+     isPlatform "mali" && depends+=(mali-fbdev)
+     isPlatform "x11" && depends+=(libx11-xcb-dev libpulse-dev)
++    # PiBoy DMG: wayland backend deps, deliberately not gated on x11.
++    depends+=(libwayland-dev wayland-protocols)
+     isPlatform "vulkan" && depends+=(libvulkan-dev mesa-vulkan-drivers)
+     isPlatform "vero4k" && depends+=(vero3-userland-dev-osmc zlib1g-dev libfreetype6-dev)
+     isPlatform "kms" && depends+=(libgbm-dev)
+@@ -67,7 +69,14 @@
+     isPlatform "arm" && params+=(--enable-floathard)
+     isPlatform "neon" && params+=(--enable-neon)
+     isPlatform "vulkan" && params+=(--enable-vulkan) || params+=(--disable-vulkan)
+-    ! isPlatform "x11" && params+=(--disable-wayland)
++    # PiBoy DMG: upstream switches Wayland off for anything that is not the
++    # x11 platform, which on a kms/mesa build removes the only backend that
++    # can run under a compositor. Enabled explicitly rather than by dropping
++    # the flag, so a missing dependency fails the build loudly instead of
++    # quietly producing a binary without it.
++    # A RetroPie-Setup update will revert this file - reapply from
++    # piboy-dmg/patches/retroarch-enable-wayland.patch
++    params+=(--enable-wayland)
+     isPlatform "vero4k" && params+=(--enable-mali_fbdev --with-opengles_libs='-L/opt/vero3/lib')
+     ./configure --prefix="$md_inst" "${params[@]}"
+     make clean

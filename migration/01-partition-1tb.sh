@@ -21,9 +21,9 @@
 set -euo pipefail
 
 DEV=/dev/mmcblk0
-EXPECT_NAME="${EXPECT_NAME:?set to your card model, e.g. SR01T - see /sys/block/mmcblk0/device/name}"
-EXPECT_SERIAL="${EXPECT_SERIAL:?set to your card serial - see /sys/block/mmcblk0/device/serial}"
-IMG="$IMAGE_DIR"
+EXPECT_NAME=SR01T
+EXPECT_SERIAL=0x9b47ae0c
+IMG=/home/mseifert/piboy-original-image
 TGT=/mnt/tgt
 
 fail() { echo "FAILED: $*" >&2; exit 1; }

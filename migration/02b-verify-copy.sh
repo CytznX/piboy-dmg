@@ -10,11 +10,11 @@
 # nothing SUBSTANTIVE is missing: no binaries, no config, no units, no home data.
 set -euo pipefail
 
-PI="$PI_USER@$PI_HOST"
-KEY="$SSH_KEY"
+PI=cytzenx@10.1.1.32
+KEY=/home/mseifert/.ssh/id_ed25519
 TGT=/mnt/tgt
-OUT="$IMAGE_DIR"/verify-diff.txt
-OWNER=$USER
+OUT=/home/mseifert/piboy-original-image/verify-diff.txt
+OWNER=mseifert
 SSH="ssh -i $KEY -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
 
 trap 'chown "$OWNER:$OWNER" "$OUT" 2>/dev/null || true' EXIT

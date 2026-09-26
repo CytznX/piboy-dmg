@@ -1,7 +1,7 @@
 #!/bin/bash
 # Minimal RetroPie build for PiBoy DMG / Trixie aarch64 (source build, no binaries)
-cd $HOME/RetroPie-Setup || exit 1
-LOG=$HOME/retropie-build.log
+cd /home/cytzenx/RetroPie-Setup || exit 1
+LOG=/home/cytzenx/retropie-build.log
 : > "$LOG"
 exec > >(tee -a "$LOG") 2>&1
 

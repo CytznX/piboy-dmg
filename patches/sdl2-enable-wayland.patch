@@ -1,0 +1,17 @@
+--- /home/cytzenx/RetroPie-Setup/scriptmodules/supplementary/sdl2.sh.pre-wayland	2026-09-25 12:10:17.304015329 -0400
++++ /home/cytzenx/RetroPie-Setup/scriptmodules/supplementary/sdl2.sh	2026-09-25 12:10:17.304411124 -0400
+@@ -49,6 +49,14 @@
+     isPlatform "gl" || isPlatform "rpi" && depends+=(libgl1-mesa-dev libglu1-mesa-dev)
+     isPlatform "kms" || isPlatform "rpi" && depends+=(libdrm-dev libgbm-dev)
+     isPlatform "x11" && depends+=(libpulse-dev libwayland-dev)
++    # SDL2 autodetects its Wayland backend at configure time, so it exists
++    # only if these headers are installed when the package is built.
++    # Upstream gates them on x11, which is why a kms/mesa build like the
++    # PiBoy ends up with no wayland video driver at all. Deliberately not
++    # gated here: the backend is inert until something sets WAYLAND_DISPLAY,
++    # so adding it changes nothing today and is the prerequisite for a
++    # layer-shell status bar over running games.
++    depends+=(libwayland-dev wayland-protocols libdecor-0-dev)
+ 
+     echo "${depends[@]}"
+ }

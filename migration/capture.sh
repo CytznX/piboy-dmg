@@ -9,12 +9,12 @@
 # than reporting a success it cannot prove.
 set -euo pipefail
 
-OUT="$IMAGE_DIR"
+OUT=/home/mseifert/piboy-original-image
 DEV=/dev/mmcblk0
 COMP=zstd
-OWNER=$USER
-EXPECT_NAME="${EXPECT_NAME:?set to your card model, e.g. SR01T - see /sys/block/mmcblk0/device/name}"
-EXPECT_SERIAL="${EXPECT_SERIAL:?set to your card serial - see /sys/block/mmcblk0/device/serial}"
+OWNER=mseifert
+EXPECT_NAME=SR01T
+EXPECT_SERIAL=0x9b47ae0c
 
 SYS=/sys/block/$(basename "$DEV")/device      # derived from $DEV, not hardcoded
 LOG=$OUT/capture.log

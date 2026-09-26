@@ -36,7 +36,7 @@ PiBoy pad and a plugged-in USB pad without per-device configuration, and picks
 up hotplugged pads (notably Bluetooth, which reconnects long after boot) via
 inotify rather than a rescan timer.
 """
-import collections, ctypes, fcntl, os, glob, select, signal, struct, sys, time
+import collections, ctypes, fcntl, os, glob, select, signal, struct, subprocess, sys, time
 
 EV_SYN      = 0x00
 EV_KEY      = 0x01
@@ -46,6 +46,15 @@ EV_SIZE     = struct.calcsize('llHHi')      # 24 bytes on 64-bit
 GRACE       = 3.0                           # seconds between SIGTERM and SIGKILL
 HOLD        = 2.0                           # console emulators: RetroArch absent
 HOLD_FORCE  = 5.0                           # anything, including a wedged RetroArch
+# Toggling the bar from here froze a running game once (2026-09-25), when this
+# daemon started waybar itself via runuser. It no longer does: statusbar.sh now
+# posts a word into a FIFO and the compositor session starts its own waybar, so
+# nothing of this daemon's - cgroup, file descriptors, PAM session - reaches a
+# GUI process any more. The original mechanism was never pinned down, so if a
+# game ever freezes on a Select hold again, set this False and say so.
+BAR_TOGGLE  = True                          # set False to disable the hold
+HOLD_BAR    = 5.0                           # SELECT ALONE: toggle the status bar
+STATUSBAR   = '/opt/retropie/configs/all/wayland/statusbar.sh'
 SHELLS      = {'bash', 'sh', 'dash', 'runcommand.sh'}
 
 # Idle blanking. The XPi owns LCD power through bit 0 of this register - it is
@@ -397,6 +406,8 @@ def main():
 
     armed = True                                # require release before re-firing
     since = None                                # when the combo became complete
+    sel_armed = True                            # ditto, for the Select-alone hold
+    sel_since = None                            # when Select went down on its own
     next_try = 0.0                              # backoff for declined soft escapes
     # One deadline governs every re-scan of /dev/input: it absorbs the burst of
     # CREATE/ATTRIB events udev fires per node, retries an open that failed, and
@@ -415,7 +426,7 @@ def main():
         # which an on-demand daemon started from runcommand hooks cannot promise.
         # Never block indefinitely with no devices open - that would be a
         # permanently dead daemon with no path to recovery.
-        if since is not None:
+        if since is not None or sel_since is not None:
             timeout = 0.25                 # timing a hold
         elif rescan_at:
             timeout = max(0.0, rescan_at - time.time())
@@ -577,6 +588,35 @@ def main():
                     armed = False
                 else:
                     next_try = now + 1.0
+
+        # SELECT ALONE, held: toggle the status bar.
+        #
+        # Start must NOT be down, which is the only thing separating this from
+        # the escape hatch above - the two share the Select button and differ
+        # by nothing else, so the test has to be for Start's ABSENCE across
+        # every device, not merely its absence from the same one.
+        #
+        # Deliberately NOT gated on runcommand running, unlike the escape
+        # hatch. The bar is worth toggling in EmulationStation too, and the
+        # reasoning that makes the escape hatch narrow does not apply here:
+        # the worst a stray trigger can do is blink the bar, where a stray
+        # escape kills someone's game. Select is an ordinary button in many
+        # games, so this WILL occasionally fire by accident; holding again
+        # puts it back.
+        sel_only = BAR_TOGGLE and (any(BTN_SELECT in v for v in held.values())
+                               and not any(BTN_START in v for v in held.values()))
+        if not sel_only:
+            sel_since, sel_armed = None, True
+        elif sel_since is None:
+            sel_since = time.time()
+        elif sel_armed and time.time() - sel_since >= HOLD_BAR:
+            sel_armed = False               # one toggle per hold, not one per pass
+            log("Select held %.0fs - toggling the status bar" % HOLD_BAR)
+            # Fire and forget: this daemon's job is input, and it must not block
+            # on a compositor that may not even be running (a KMS boot has no
+            # bar to toggle). statusbar.sh says so on stderr and exits nonzero.
+            subprocess.run([STATUSBAR, "toggle"], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Never leave the panel dark for the next process to puzzle over. The unit's
     # ExecStopPost repeats this as root, which covers a crash or SIGKILL.

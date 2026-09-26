@@ -1,0 +1,401 @@
+Add a persistent status bar for the PiBoy DMG: clock left, status right.
+
+A bar over both the frontend and running games is normally a compositor job -
+under full KMS only the DRM master may add an overlay plane, and that is
+EmulationStation or RetroArch, never a helper process. The legacy stack this
+device shipped with drew one through dispmanx, which full KMS removes.
+
+RetroArch already has the mechanism, though. status_text, built from fps_show,
+framecount_show and memory_show, is pushed every frame with duration 1 and
+flush=true - precisely a permanent overlay. This adds one more block to that
+chain behind a status_bar_show setting: no compositor, no Wayland rebuild, no
+change to input routing.
+
+Layout follows the existing anchors. status_text is right-anchored off
+top_right_x_advance and the paused/fast-forward/rewind indicators march
+leftwards from it, so the clock travels separately in status_bar_clock and is
+drawn at x=0 where nothing else can collide with it.
+
+Fields: battery with charge state, SoC temperature, strongest wireless signal,
+and volume. All are small sysfs/procfs reads and none changes faster than once
+a minute, so they refresh on the FPS counter's cadence. Volume is the exception
+- it must feel live - so it is polled every few frames, but only a stat() until
+the mtime moves. Any field whose file is missing is omitted, so this degrades
+field by field rather than failing.
+
+The wireless level is chosen by signal strength rather than by interface name.
+A hotplug renumbers wlanN, and on this machine the good adapter is not reliably
+wlan0 - assuming otherwise once cost an evening.
+
+Volume shows as a plain percentage rather than a drawn bar: the widget renderer
+loads its own proportional font from the asset pack, not video_font_path, so a
+bar of '=' and '-' would change width as it filled.
+
+Note the gate is duplicated. video_driver.c decides whether to publish
+status_text; gfx_widgets.c decides independently whether to draw it. Both list
+the same flags and BOTH must know about the new one, or the string is built and
+silently never rendered. The four simple_widget_height offsets are extended too,
+so the indicators clear the status row instead of drawing over it.
+
+This needs menu_enable_widgets=true if anything else uses SHOW_MSG: with widgets
+off, status_text shares the notification queue and its per-frame flush=true
+clears it; with widgets on it has its own slot and the two coexist.
+
+The separator test is deliberately buf_pos > 0 rather than
+status_text[buf_pos-1] != '\0' as the blocks above use. Theirs reads
+status_text[-1] when nothing has been appended yet.
+
+diff -urN a/configuration.c b/configuration.c
+--- a/configuration.c	2026-09-13 23:13:30.683888186 -0400
++++ b/configuration.c	2026-09-13 23:13:30.864891096 -0400
+@@ -1700,6 +1700,7 @@
+    SETTING_BOOL("statistics_show",               &settings->bools.video_statistics_show, true, DEFAULT_STATISTICS_SHOW, false);
+    SETTING_BOOL("framecount_show",               &settings->bools.video_framecount_show, true, DEFAULT_FRAMECOUNT_SHOW, false);
+    SETTING_BOOL("memory_show",                   &settings->bools.video_memory_show, true, DEFAULT_MEMORY_SHOW, false);
++   SETTING_BOOL("status_bar_show",               &settings->bools.video_status_bar_show, true, false, false);
+    SETTING_BOOL("ui_menubar_enable",             &settings->bools.ui_menubar_enable, true, DEFAULT_UI_MENUBAR_ENABLE, false);
+    SETTING_BOOL("pause_nonactive",               &settings->bools.pause_nonactive, true, DEFAULT_PAUSE_NONACTIVE, false);
+    SETTING_BOOL("pause_on_disconnect",           &settings->bools.pause_on_disconnect, true, DEFAULT_PAUSE_ON_DISCONNECT, false);
+diff -urN a/configuration.h b/configuration.h
+--- a/configuration.h	2026-09-13 23:13:30.680888138 -0400
++++ b/configuration.h	2026-09-13 23:13:30.863891079 -0400
+@@ -623,6 +623,7 @@
+       bool video_statistics_show;
+       bool video_framecount_show;
+       bool video_memory_show;
++      bool video_status_bar_show;
+       bool video_msg_bgcolor_enable;
+ #ifdef _3DS
+       bool video_3ds_lcd_bottom;
+diff -urN a/gfx/gfx_widgets.c b/gfx/gfx_widgets.c
+--- a/gfx/gfx_widgets.c	2026-09-13 23:13:30.691888315 -0400
++++ b/gfx/gfx_widgets.c	2026-09-13 23:22:49.688746849 -0400
+@@ -1546,6 +1546,7 @@
+    bool framecount_show             = video_info->framecount_show;
+    bool memory_show                 = video_info->memory_show;
+    bool core_status_msg_show        = video_info->core_status_msg_show;
++   bool status_bar_show             = video_info->status_bar_show;
+    void *userdata                   = video_info->userdata;
+    unsigned video_width             = video_info->width;
+    unsigned video_height            = video_info->height;
+@@ -1681,6 +1682,7 @@
+          || framecount_show
+          || memory_show
+          || core_status_msg_show
++         || status_bar_show
+          )
+    {
+       const char *txt      = *p_dispwidget->gfx_widgets_status_text == '\0'
+@@ -1728,6 +1730,48 @@
+             true);
+    }
+ 
++   /* Clock, drawn top-LEFT.
++    *
++    * The status text above is right-anchored off top_right_x_advance, and the
++    * paused/fast-forward/rewind indicators march leftwards from it. Anchoring
++    * the clock at x=0 keeps it clear of all of them however wide they get.
++    * Same quad + text pair as the status block, just at the other edge. */
++   if (status_bar_show && *video_info->status_bar_clock != '\0')
++   {
++      const char *ctxt = video_info->status_bar_clock;
++      int clk_width    = font_driver_get_message_width(
++            p_dispwidget->gfx_widget_fonts.regular.font,
++            ctxt, strlen(ctxt), 1.0f);
++      int clk_total    = clk_width + p_dispwidget->simple_widget_padding * 2;
++
++      gfx_display_set_alpha(p_dispwidget->backdrop_orig, DEFAULT_BACKDROP);
++
++      gfx_display_draw_quad(
++            p_disp,
++            userdata,
++            video_width,
++            video_height,
++            0,
++            0,
++            clk_total,
++            p_dispwidget->simple_widget_height,
++            video_width,
++            video_height,
++            p_dispwidget->backdrop_orig,
++            NULL
++            );
++
++      gfx_widgets_draw_text(&p_dispwidget->gfx_widget_fonts.regular,
++            ctxt,
++            p_dispwidget->simple_widget_padding,
++            p_dispwidget->simple_widget_height / 2.0f
++            + p_dispwidget->gfx_widget_fonts.regular.line_centre_offset,
++            video_width, video_height,
++            0xFFFFFFFF,
++            TEXT_ALIGN_LEFT,
++            true);
++   }
++
+    /* Indicators */
+    if (widgets_is_paused)
+       top_right_x_advance -= gfx_widgets_draw_indicator(
+@@ -1739,7 +1783,7 @@
+             video_height,
+             p_dispwidget->gfx_widgets_icons_textures[
+             MENU_WIDGETS_ICON_PAUSED],
+-            (fps_show
++            ((fps_show || status_bar_show)
+              ? p_dispwidget->simple_widget_height
+              : 0),
+             top_right_x_advance,
+@@ -1755,7 +1799,7 @@
+             video_height,
+             p_dispwidget->gfx_widgets_icons_textures[
+             MENU_WIDGETS_ICON_FAST_FORWARD],
+-            (fps_show ? p_dispwidget->simple_widget_height : 0),
++            ((fps_show || status_bar_show) ? p_dispwidget->simple_widget_height : 0),
+             top_right_x_advance,
+             MSG_FAST_FORWARD);
+ 
+@@ -1769,7 +1813,7 @@
+             video_height,
+             p_dispwidget->gfx_widgets_icons_textures[
+             MENU_WIDGETS_ICON_REWIND],
+-            (fps_show ? p_dispwidget->simple_widget_height : 0),
++            ((fps_show || status_bar_show) ? p_dispwidget->simple_widget_height : 0),
+             top_right_x_advance,
+             MSG_REWINDING);
+ 
+@@ -1784,7 +1828,7 @@
+             video_height,
+             p_dispwidget->gfx_widgets_icons_textures[
+             MENU_WIDGETS_ICON_SLOW_MOTION],
+-            (fps_show ? p_dispwidget->simple_widget_height : 0),
++            ((fps_show || status_bar_show) ? p_dispwidget->simple_widget_height : 0),
+             top_right_x_advance,
+             MSG_SLOW_MOTION);
+       (void)top_right_x_advance;
+diff -urN a/gfx/video_driver.c b/gfx/video_driver.c
+--- a/gfx/video_driver.c	2026-09-13 23:13:30.688888267 -0400
++++ b/gfx/video_driver.c	2026-09-14 08:39:06.996594109 -0400
+@@ -21,6 +21,22 @@
+ #include <string/stdstring.h>
+ #include <retro_math.h>
+ #include <retro_timers.h>
++#include <time.h>
++#include <sys/stat.h>
++
++/* Status bar sources. Everything here is a small sysfs/procfs read; none of
++ * these values changes faster than once a minute, so they are refreshed on
++ * the FPS counter's cadence rather than at frame rate. Volume is the
++ * exception - it must feel live, so it is polled far more often, but only a
++ * stat() until the mtime actually moves. */
++#define STATUS_BAR_CAPACITY "/sys/class/power_supply/xpi-battery/capacity"
++#define STATUS_BAR_STATUS   "/sys/class/power_supply/xpi-battery/status"
++#define STATUS_BAR_THERMAL  "/sys/class/thermal/thermal_zone0/temp"
++#define STATUS_BAR_WIRELESS "/proc/net/wireless"
++#define STATUS_BAR_VOLUME   "/run/piboy-volume"
++#define STATUS_BAR_INTERVAL 600   /* frames between slow-field refreshes */
++#define STATUS_BAR_VOL_POLL   4   /* frames between volume stat() calls   */
++#define STATUS_BAR_VOL_MS  1800   /* how long a volume change stays shown */
+ 
+ #ifdef HAVE_CONFIG_H
+ #include "../config.h"
+@@ -2576,6 +2592,7 @@
+    video_info->memory_show                 = settings->bools.video_memory_show;
+    video_info->statistics_show             = settings->bools.video_statistics_show;
+    video_info->framecount_show             = settings->bools.video_framecount_show;
++   video_info->status_bar_show             = settings->bools.video_status_bar_show;
+    video_info->core_status_msg_show        = runloop_st->core_status_msg.set;
+    video_info->aspect_ratio_idx            = settings->uints.video_aspect_ratio_idx;
+    video_info->post_filter_record          = settings->bools.video_post_filter_record;
+@@ -3566,6 +3583,166 @@
+          status_text[++buf_pos]   = '\0';
+       }
+ 
++      /* Persistent status bar.
++       *
++       * Rides the same status_text that fps_show and memory_show build, because
++       * video_driver_frame() already pushes that every frame with duration 1 and
++       * flush=true - exactly what a permanent overlay needs, and the reason this
++       * needs no compositor. The clock travels separately in status_bar_clock
++       * because it is drawn at the opposite corner.
++       *
++       * Battery, temperature and signal come from sysfs/procfs: the frontend
++       * powerstate driver reports nothing on this board. Any field whose file is
++       * missing is simply omitted, so this degrades field by field rather than
++       * failing. */
++      if (video_info.status_bar_show)
++      {
++         static char     sb_fields[96];
++         static uint64_t sb_next;
++         static int      sb_vol      = -1;
++         static uint64_t sb_vol_next;
++         static int64_t  sb_vol_seen;
++         char            scratch[32];
++         FILE           *fp;
++
++         /* --- clock, drawn top-left --- */
++         if (video_st->frame_count >= sb_next || video_info.status_bar_clock[0] == '\0')
++         {
++            struct tm tm_now;
++            time_t    now = time(NULL);
++            size_t    n   = 0;
++
++            if (localtime_r(&now, &tm_now))
++               strftime(video_info.status_bar_clock,
++                     sizeof(video_info.status_bar_clock), "%H:%M", &tm_now);
++
++            /* --- battery, with charge state --- */
++            sb_fields[0] = '\0';
++            if ((fp = fopen(STATUS_BAR_CAPACITY, "r")))
++            {
++               int pct;
++               if (fscanf(fp, "%d", &pct) == 1 && pct >= 0 && pct <= 100)
++               {
++                  const char *tag = "bat";
++                  FILE *sf;
++                  if ((sf = fopen(STATUS_BAR_STATUS, "r")))
++                  {
++                     if (fgets(scratch, sizeof(scratch), sf))
++                        if (  !strncmp(scratch, "Charging", 8)
++                           || !strncmp(scratch, "Full", 4))
++                           tag = "chg";
++                     fclose(sf);
++                  }
++                  n += snprintf(sb_fields + n, sizeof(sb_fields) - n,
++                        "%s %d%%", tag, pct);
++               }
++               fclose(fp);
++            }
++
++            /* --- SoC temperature, millidegrees --- */
++            if ((fp = fopen(STATUS_BAR_THERMAL, "r")))
++            {
++               int milli;
++               if (fscanf(fp, "%d", &milli) == 1 && milli > 0 && milli < 200000)
++                  n += snprintf(sb_fields + n, sizeof(sb_fields) - n,
++                        "%s%dC", n ? "  " : "", (milli + 500) / 1000);
++               fclose(fp);
++            }
++
++            /* --- strongest wireless link.
++             * Picked by level rather than by interface name: a hotplug
++             * renumbers wlanN, and the good adapter is not reliably wlan0. */
++            if ((fp = fopen(STATUS_BAR_WIRELESS, "r")))
++            {
++               char line[160];
++               int  best = 1;   /* levels are negative dBm; 1 means none seen */
++               /* two header lines */
++               if (fgets(line, sizeof(line), fp) && fgets(line, sizeof(line), fp))
++               {
++                  while (fgets(line, sizeof(line), fp))
++                  {
++                     char *colon = strchr(line, ':');
++                     float link, level;
++                     if (!colon)
++                        continue;
++                     /* Fields after the colon are "status link level"; the
++                      * leading status word must be skipped or link picks up
++                      * 0000 and level picks up the link quality, which is
++                      * positive and fails the sanity check below - leaving the
++                      * field silently absent. */
++                     if (sscanf(colon + 1, "%*s %f %f", &link, &level) == 2)
++                     {
++                        int lv = (int)level;
++                        if (lv < 0 && (best > 0 || lv > best))
++                           best = lv;
++                     }
++                  }
++               }
++               if (best < 0)
++                  n += snprintf(sb_fields + n, sizeof(sb_fields) - n,
++                        "%s%ddBm", n ? "  " : "", best);
++               fclose(fp);
++            }
++
++            sb_next = video_st->frame_count + STATUS_BAR_INTERVAL;
++         }
++
++         /* --- volume, polled far more often but only stat() until it moves ---
++          * piboy-vold writes the wheel position here on every change. A recent
++          * mtime means the user is turning it now, so the bar shows volume
++          * instead of the static fields; otherwise the fields come back. */
++         if (video_st->frame_count >= sb_vol_next)
++         {
++            struct stat st;
++            sb_vol_next = video_st->frame_count + STATUS_BAR_VOL_POLL;
++            if (stat(STATUS_BAR_VOLUME, &st) == 0)
++            {
++               struct timespec ts;
++               int64_t age;
++               clock_gettime(CLOCK_REALTIME, &ts);
++               age = (int64_t)(ts.tv_sec - st.st_mtim.tv_sec) * 1000
++                   + (ts.tv_nsec - st.st_mtim.tv_nsec) / 1000000;
++               if (age >= 0 && age < STATUS_BAR_VOL_MS)
++               {
++                  if ((fp = fopen(STATUS_BAR_VOLUME, "r")))
++                  {
++                     int w;
++                     if (fscanf(fp, "%d", &w) == 1 && w >= 0 && w <= 100)
++                        sb_vol = w;
++                     fclose(fp);
++                  }
++                  sb_vol_seen = age;
++               }
++               else
++                  sb_vol = -1;
++            }
++            else
++               sb_vol = -1;
++         }
++         (void)sb_vol_seen;
++
++         if (buf_pos > 0)
++         {
++            status_text[  buf_pos] = ' ';
++            status_text[++buf_pos] = '|';
++            status_text[++buf_pos] = '|';
++            status_text[++buf_pos] = ' ';
++            status_text[++buf_pos] = '\0';
++         }
++         if (sb_vol >= 0)
++         {
++            /* A plain percentage, not a drawn bar: the widget renderer uses its
++             * own proportional font from the asset pack, so a bar of '=' and '-'
++             * would change width as it filled. */
++            snprintf(scratch, sizeof(scratch), "VOL %d%%", sb_vol);
++            buf_pos += strlcpy(status_text + buf_pos, scratch,
++                  sizeof(status_text) - buf_pos);
++         }
++         else
++            buf_pos += strlcpy(status_text + buf_pos, sb_fields,
++                  sizeof(status_text) - buf_pos);
++      }
++
+       if ((video_st->frame_count % fps_update_interval) == 0)
+       {
+          size_t new_len;
+@@ -3942,6 +4119,7 @@
+           || video_info.framecount_show
+           || video_info.memory_show
+           || video_info.core_status_msg_show
++          || video_info.status_bar_show
+          )
+        && !((video_info.menu_st_flags & MENU_ST_FLAG_SCREENSAVER_ACTIVE))
+        && !video_info.notifications_hidden
+diff -urN a/gfx/video_driver.h b/gfx/video_driver.h
+--- a/gfx/video_driver.h	2026-09-13 23:13:30.685888218 -0400
++++ b/gfx/video_driver.h	2026-09-13 23:13:30.865891112 -0400
+@@ -457,6 +457,7 @@
+    uint16_t menu_st_flags;
+ 
+    char stat_text[1024];
++   char status_bar_clock[16];
+ 
+    bool widgets_active;
+    bool notifications_hidden;
+@@ -472,6 +473,7 @@
+    bool memory_show;
+    bool statistics_show;
+    bool framecount_show;
++   bool status_bar_show;
+    bool core_status_msg_show;
+    bool post_filter_record;
+    bool windowed_fullscreen;
