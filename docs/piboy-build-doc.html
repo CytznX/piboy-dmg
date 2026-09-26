@@ -353,6 +353,7 @@
       <span><b>Target</b> Trixie arm64, kernel 6.18</span>
       <span><b>From</b> RetroPie 4.8.12 / Buster, 32-bit</span>
       <span><b>Verified</b> 22 Aug 2026</span>
+      <span><b>Revised</b> 26 Sep 2026 — compositor, DKMS, fuel gauge</span>
     </div>
   </header>
 
@@ -395,7 +396,7 @@
 
   <section>
     <div class="eyebrow">Read this first</div>
-    <h2>Fourteen traps that cost real time</h2>
+    <h2>Twenty traps that cost real time</h2>
     <p>Each of these presents as a hardware fault. None of them is one.</p>
 
     <div class="traps">
@@ -455,6 +456,7 @@ SystemMaxUse=64M</code></pre>
       <div class="trap">
         <h3>A kernel update silently orphans the module — and never <code>rmmod</code> it</h3>
         <p>Modules install under <code>/lib/modules/$(uname -r)/</code>. An <code>apt</code> upgrade that pulls a new kernel (ours went 6.18.34 → 6.18.39 mid-session) leaves the module behind at the old path, so after the next boot there is no controller, no telemetry and <strong>no fan control</strong>, silently. Rebuild against the running kernel, or better, register it with DKMS so upgrades rebuild it for you — which is exactly what Experimental Pi did.</p>
+        <p><strong>Since done, and it earned itself immediately.</strong> With the driver under DKMS, the 6.18.39 → 6.18.50 upgrade rebuilt and loaded it unattended, and the device came back with the panel intact and no failed units. Note that DKMS installs to <code>updates/dkms/</code>, which outranks <code>extra/</code> on the module search path — so a hand-built <code>.ko</code> left in <code>extra/</code> is silently shadowed, and you can spend a while wondering why your changes have no effect.</p>
         <p>Separately: do not <code>rmmod xpi_gamecon</code> on a running device. The XPi microcontroller is what supplies power to the Pi, and the driver talks to it at 125 Hz. Stop that conversation and the board appears to conclude the host is gone — ours powered off mid-command. Install the new <code>.ko</code> and reboot instead.</p>
       </div>
 
@@ -526,6 +528,42 @@ vendor values     6-12%    58-62 C      51-110/255   <span class="c"># ~10 C, an
       <div class="trap">
         <h3>The first-run wizard renames uid 1000</h3>
         <p>If provisioning fails and the setup wizard runs, it renames the stock <code>pi</code> account to whatever username you pick and <em>moves its home directory</em>. Anything staged in <code>/home/pi</code> travels with it — which is worth knowing both as a hazard and as a trick: an <code>authorized_keys</code> written to <code>/home/pi</code> before first boot survives into the new user's home and gives you SSH regardless of what the wizard did.</p>
+      </div>
+
+      <div class="trap">
+        <h3>The fan byte is tenths of a percent, not a PWM value</h3>
+        <p>The XPi's fan field looks exactly like an 8-bit duty cycle, and every line of the ported driver treated it as one. It is not. <strong>0&ndash;254 means 0.0%&ndash;25.4% power; 255 on its own means 100%.</strong> Nothing in the protocol hints at the discontinuity, and any value you pick produces <em>some</em> airflow, so it never looks wrong.</p>
+        <p>The port had been writing 64 as its idle value &mdash; 6.4% &mdash; and 10 at init, which is 1.0%. Every band of the curve was roughly a tenth of its intended power, and the fan sounded busy while moving almost nothing. Correcting the encoding recovered about double the airflow at the same apparent settings. If you inherit a vendor protocol, confirm the units against observed behaviour before tuning anything on top of them.</p>
+      </div>
+
+      <div class="trap">
+        <h3><code>apt-get upgrade</code> silently holds the kernel back</h3>
+        <p>Upgrading <code>linux-image-rpi-v8</code> requires installing a <em>new</em> package name (<code>linux-image-6.18.50+rpt-rpi-v8</code>), and plain <code>upgrade</code> never installs new packages. It reports success, and the kernel quietly stays where it was &mdash; which on this device also means the freshly built module still matches, so nothing breaks and nothing tells you.</p>
+        <p>Use <code>apt-get --with-new-pkgs upgrade</code>. <code>full-upgrade</code> also works but is allowed to <em>remove</em> packages, which is a bad trade on a handheld you cannot easily recover. Run the whole thing under <code>systemd-run --collect</code> so an SSH drop cannot wedge <code>dpkg</code> mid-transaction, and pass <code>-o Dpkg::Options::=--force-confold</code> to protect a tuned <code>config.txt</code>.</p>
+      </div>
+
+      <div class="trap">
+        <h3><code>/run</code> is root-owned, so a session script cannot create its own runtime file</h3>
+        <p>The volume OSD watches <code>/run/piboy-volume</code>, which the root daemon creates the first time the wheel is <em>turned</em>. <code>/run</code> is tmpfs, so it is empty at every boot; the watcher starts before any wheel movement, finds nothing to watch, and exits. It ran as the session user, and <code>/run</code> is <code>root:root</code> mode 0755, so it could not create the file either.</p>
+        <p>The result was an OSD that was dead on every boot for a week, with nothing in any log. It passed a hands-on test only because the watcher had been started by hand <em>after</em> the file happened to exist &mdash; the process start times gave it away, not the behaviour. Create the file from <code>systemd-tmpfiles</code>, which runs as root before anything needs it, and make the script complain rather than exit 0 when the file is missing. <strong>A feature verified by eye is only verified for the way it was started.</strong></p>
+      </div>
+
+      <div class="trap">
+        <h3>Being the right uid is not being in the session</h3>
+        <p>A helper decided whether it was inside the Wayland session by comparing uid against the session user's. The input daemon runs as <code>User=cytzenx</code> &mdash; the same uid &mdash; but it is a systemd service with none of the session environment. The test said "act directly", the helper launched a GUI client with no <code>WAYLAND_DISPLAY</code>, GTK fell back to X11, and it died instantly with <code>cannot open display</code>.</p>
+        <p>Test for <code>WAYLAND_DISPLAY</code>, not for who you are. Having the display <em>is</em> the definition of being in the session. The same mistake hid a second bug for hours: every test used <code>sudo</code>, so uid 0 never matched and always took the working path &mdash; the broken branch was the only one never exercised. To test a daemon's real path, strip the environment the way systemd does: <code>sudo -u user env -i PATH=... HOME=...</code>.</p>
+      </div>
+
+      <div class="trap">
+        <h3><code>(( n++ ))</code> returns the old value as its exit status</h3>
+        <p>A low-battery shutdown counted consecutive samples with <code>(( n++ )) || n=0</code>, which reads as "increment, and reset on failure". Post-increment evaluates to the value <em>before</em> the increment, and an arithmetic expression worth zero is a <strong>false</strong> exit status &mdash; so at <code>n=0</code> the <code>||</code> branch fires and resets the counter to zero. It can never reach 1. The shutdown would never have run.</p>
+        <p>Use an explicit <code>if</code>. Any bash arithmetic whose result can legitimately be zero is a trap when used as a condition, and this one is silent: nothing errors, the counter simply never advances.</p>
+      </div>
+
+      <div class="trap">
+        <h3><code>pgrep -f</code> matches the shell that ran it</h3>
+        <p>Matching against the full command line also matches the shell whose command line contains the pattern &mdash; including the one executing the <code>pkill</code>. Over one session this killed a live EmulationStation session, and twice killed the SSH connection issuing it, which reads as a network fault rather than self-harm.</p>
+        <p>The common <code>[p]attern</code> bracket trick protects the <code>pgrep</code> process itself but <strong>not</strong> the shell wrapping it, so a script whose body contains the string is still a match. Capture the pid first and kill that; match on an exact process name (<code>-x</code>) when you must match by name at all; never pipe a <code>-f</code> match straight into <code>kill</code>.</p>
       </div>
     </div>
   </section>
@@ -870,6 +908,14 @@ else if (pct &gt;= 100)                   val-&gt;intval = POWER_SUPPLY_STATUS_F
 else if (cur &lt; -XPI_CUR_DEADBAND)      val-&gt;intval = POWER_SUPPLY_STATUS_DISCHARGING;
 else                                   val-&gt;intval = POWER_SUPPLY_STATUS_CHARGING;</code></pre>
     <p>The net-draining case is kept deliberately: plugged in and still losing charge past the deadband is a genuine condition — the supply cannot keep up — and worth surfacing rather than hiding behind "it is plugged in, therefore charging". Measured afterwards: steady <code>Full</code>, and <strong>zero</strong> power_supply uevents in ten seconds where the old build emitted one per flap.</p>
+
+    <h3>Counting charge instead of guessing it</h3>
+    <p>Everything above establishes why the MCU's own <code>percent</code> cannot be trusted on a handheld: it is a bare voltage lookup, and terminal voltage is dominated by IR drop. The number climbs when you drop to the menu and falls when a game starts, and <em>none of that motion is charge</em>. The fix is to integrate current and use voltage only as a slow anchor.</p>
+    <p>Anchoring cannot wait for the pack to rest, because on a Pi 4 it never does &mdash; idle is still ~450 mA. So open-circuit voltage is inferred instead: <code>OCV = V − I·R</code>. At 600 mA through ~100 mΩ that is a 60 mV correction, twelve times the voltage LSB, so it is well resolved. The anchor is then weighted by how much the curve is actually saying &mdash; steep near full and near empty, nearly flat from 30&ndash;70%, where a millivolt of error is several percent of charge and the anchor is worth very little.</p>
+    <p><strong>The 50 mA quantisation is the whole design problem.</strong> At a typical 600 mA draw one LSB is 8% of the reading, and if the MCU truncates rather than rounds, the error is a <em>bias</em> rather than noise: 50 mA held for six hours is 300 mAh, 7.5% of the pack, all in one direction. Coulomb counting alone therefore drifts however carefully it is done, and must be re-anchored against voltage.</p>
+    <p>It publishes through a driver <code>capacity_override</code> node, so EmulationStation, RetroArch, upower and the fan daemon all see the better number through the interface they already read. The override expires after 60 s, so a dead writer restores the MCU's own value rather than freezing a stale one on screen.</p>
+    <p><strong>A resumed charge must be checked, not trusted.</strong> The state file survives a reboot, but the pack may have been <em>charged</em> while the handheld was off &mdash; the ordinary thing to do after it shut down empty &mdash; and no amount of integrating can discover that. Worse, the display rule that stops the percentage climbing while discharging will then pin it to the stale low value for the whole session, and an empty-pack shutdown reading that pinned number powers the device off on a full battery, nine seconds after boot. Reproduced before it was fixed. Compare the resumed charge against OCV on the first sample and discard it when they disagree.</p>
+    <p>The shutdown itself lives in the gauge, deliberately <em>not</em> in the fan daemon: that one exits when the fan PWM is unwritable and then burns its systemd start limit, which would make protection against an unclean power cut contingent on the <strong>fan</strong> hardware. Two triggers, less redundant than they look &mdash; the gauge's own estimate, and a raw voltage floor that depends on no calibration at all.</p>
   </section>
 
   <section>
@@ -1115,6 +1161,8 @@ menu_enable_widgets = "false"
 exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 45%" &gt;&amp;3</code></pre>
     <p>Ownership is split by which daemon owns the event. <code>piboy-vold</code> draws the volume slider, because it is the process holding the wheel's evdev fd; it renders the position as <code>Volume [========--------] 50%</code>. <code>piboy-fand</code> fires the same mechanism when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than Experimental Pi's static meter, which you had to look at.</p>
     <p>For the menu itself, <code>menu_battery_level_enable</code> shows charge in RGUI's top-right — but only alongside <code>menu_timedate_enable</code>, since in RGUI they share one status line. And note RetroPie's EmulationStation has <em>no</em> status display of any kind: no clock, no battery, nothing in the binary to enable.</p>
+    <div class="note"><strong>Superseded for the bar, kept for alerts.</strong> A compositor now owns DRM master and draws a real layer-shell bar over everything &mdash; see <em>The compositor: one bar over everything</em> below, which is what this section was reasoning towards. The <code>SHOW_MSG</code> path stays, because it is not a status bar: it is how a transient alert reaches whatever is running, and the flush patch above is what lets it replace rather than queue.</div>
+
 
     <h3>Measured: leave the bit-bang clock alone</h3>
     <p>The driver busy-spins in <code>udelay()</code> to clock its 2-wire protocol, and the half-period is a compile-time constant. Arithmetic suggests it costs a fifth of a core permanently, which makes lowering it look like the biggest available win. Make it a writable module parameter, add <em>cumulative</em> CRC counters (Experimental Pi's <code>lastgood</code>/<code>lasterror</code> are consecutive-run counters and cannot express a rate), and sweep it:</p>
@@ -1230,24 +1278,50 @@ kill -TERM "$(pgrep -f "^$ES_BIN")"   <span class="c"># just the binary, not the
     <div class="note warn"><strong>Never swap out from under a running game.</strong> That is somebody's unsaved progress. Defer to the next time they are at the menu &mdash; and do not record the new display state when you defer, or every later check sees no change and the swap is lost for good.</div>
   </section>
 
+
   <section>
-    <div class="eyebrow">Open</div>
-    <h2>What is not solved</h2>
-    <h3>What a real status bar would take</h3>
+    <div class="eyebrow">Solved · Sep 2026</div>
+    <h2>The compositor: one bar over everything</h2>
+
     <p><strong>First, why this is hard now and was not before.</strong> Experimental Pi's <code>osd</code> binary drew the volume icon, the clock and the rest as a <em>hardware overlay</em>, through dispmanx:</p>
 <pre><code>vc_dispmanx_display_open      vc_dispmanx_resource_write_data
 vc_dispmanx_element_add       vc_dispmanx_element_change_attributes
 vc_dispmanx_update_submit_sync</code></pre>
     <p>VideoCore composited that element above whatever was running, so it never involved the frontend or the emulator at all. It polled <code>/sys/kernel/xpi_gamecon/volume</code> in a <code>usleep</code> loop and shelled out to <code>amixer</code> &mdash; cruder than anything here on the mechanics &mdash; but its <em>drawing</em> had no competition. That is why their volume slider was instant and ours had to be fought for.</p>
     <p>dispmanx exists only under the legacy stack. Theirs ran <code>dtoverlay=vc4-fkms-v3d</code>; this port runs full KMS, which the DPI panel, HDMI hotplug and the backlight classdev all depend on, and under full KMS the firmware display path is bypassed and dispmanx is gone. The modern equivalent is a DRM overlay plane, and only the DRM master may add one &mdash; which is ES or RetroArch, never us. <strong>So the volume OSD and the status bar were never two problems. They were one capability that disappeared.</strong></p>
-    <p>A permanent strip over both the frontend and games means running a Wayland compositor (<code>labwc</code>, <code>cage</code>) as DRM master, with ES and RetroArch as clients and a layer-shell bar (<code>waybar</code>, <code>yambar</code>) above them. That is the honest modern equivalent of dispmanx. The blocker is that RetroPie builds RetroArch <strong>without</strong> Wayland:</p>
-<pre><code>retroarch --features
-  Wayland  - Wayland input/video drivers: no
-  KMS      - Video context driver: yes</code></pre>
-    <p>So it is a compositor install, a full RetroArch rebuild from source with Wayland enabled, reworked input routing, and a compositing cost on a 640×480 panel where a 20 px bar is 4% of the screen. Treat it as its own project, with a working image backed up first.</p>
-    <p><strong>There is a cheaper route that is not a compositor.</strong> Patch each client to draw its own bar: EmulationStation already has one written here, and RetroArch renders an in-game FPS overlay every frame through <code>font_driver_render_msg</code>, which a status string can ride. Counting actual libraries on this build, RetroArch cores cover <strong>6235 files against 126 standalone</strong> &mdash; 98%, with only Dreamcast (<code>redream</code>) and a few Z-machine titles outside. It is not a true always-on-top bar: it cannot cover a closed-source standalone emulator, <code>runcommand</code>'s launch screen, or the gap between ES and a game starting. But it is two patches against one compositor, and the RetroArch half is proven &mdash; the <code>SHOW_MSG</code> flush patch above went through exactly that build path.</p>
 
-    <p><strong>Back up the binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
+    <p>The answer was the compositor. <code>labwc</code> runs as DRM master with EmulationStation as a client, and <code>waybar</code> draws a layer-shell bar above it &mdash; over ES, over RetroArch, over every standalone alike. That is the honest modern equivalent of what VideoCore was doing, and it is the only thing that covers the cases a per-client patch never could: <code>runcommand</code>'s launch screen, a closed-source standalone, and the gap between ES and a game starting.</p>
+
+    <p><strong>SDL2 was the chokepoint, and that is what made it tractable.</strong> RetroPie builds its own SDL2 from source and nothing in the recipe disables Wayland &mdash; the driver list went <code>x11,KMSDRM,offscreen,dummy,evdev</code> to <code>x11,wayland,KMSDRM,&hellip;</code> from a one-line change. Because ES, PPSSPP and the SDL2-based ports all link it, every one of them became a native Wayland client for free, with no per-emulator work at all. RetroArch needed its own rebuild (<code>Wayland: yes</code>, KMS retained). <code>/usr/bin/emulationstation</code> already sets <code>SDL_VIDEODRIVER=wayland</code> itself when it sees <code>WAYLAND_DISPLAY</code>, so nothing had to force it.</p>
+
+    <p><strong>Do not try to start the compositor over SSH.</strong> An SSH session has no seat, so <code>labwc</code> cannot take DRM master and the failure is opaque. Swap what <code>autostart.sh</code> launches and reboot: labwc then starts inside the existing tty1 logind session, which already owns seat0.</p>
+
+    <p><strong>The bar must be on the <code>overlay</code> layer, not <code>top</code>.</strong> wlroots raises a fullscreen window above the top layer, so a bar configured on <code>top</code> is accepted, logs the correct geometry, and is completely invisible the moment a game starts. It costs direct scanout &mdash; the compositor composites every frame, measured at <strong>~11% of a core with the bar up against ~3% without</strong> &mdash; and that is the price of the capability, not a bug to tune away.</p>
+
+    <h3>Under a compositor, nothing has a controlling terminal</h3>
+    <p>labwc detaches from the VT, so EmulationStation runs with tty <code>?</code> and every child inherits it. Opening <code>/dev/tty</code> then fails with <code>ENXIO</code>, which breaks <code>runcommand</code> in two places: the "press a button to configure" key read, and &mdash; fatally &mdash; the emulator launch itself, which redirects stdin from <code>/dev/tty</code>. With no fallback, <em>nothing launches at all</em>.</p>
+    <p>Two fixes, in that order. Probe once and fall back to <code>/dev/null</code>, which gets games launching. Then re-exec the whole script inside a Wayland terminal when one is available: a terminal supplies a pty, which fixes both halves at once &mdash; <code>/dev/tty</code> becomes real, the key read works, and <code>dialog</code> has somewhere visible to draw. Pass <code>--term=xterm-256color</code>; <code>foot</code> defaults to <code>TERM=foot</code>, and a missing terminfo breaks <code>tput</code> and <code>dialog</code> exactly like <code>TERM=unknown</code>.</p>
+    <p>Writing that patch has its own trap: the probe <code>: &lt;/dev/tty</code> is itself a <code>&lt;/dev/tty</code>, so do the redirection replacement <em>before</em> inserting the probe or it rewrites itself into a self-reference.</p>
+
+    <h3>The configuration menu needed a separate fix</h3>
+    <p>The <code>retropie</code> system in <code>es_systems.cfg</code> calls <code>retropie_packages.sh</code> directly and never touches <code>runcommand</code>, so the terminal handling above does not cover it. Every entry hung the handheld on a black screen, and killing it skipped <code>joy2keyStop</code>, leaving an orphaned <code>joy2key</code> fighting ES for the gamepad.</p>
+    <p>It is fixed with a wrapper rather than a patch, because <strong><code>sudo</code>'s <code>env_reset</code> has already stripped <code>WAYLAND_DISPLAY</code></strong> by the time that script runs. A patch inside it could not find the compositor without also adding <code>sudo -E</code> or a sudoers rule, and would leave a root process owning a GUI client. The wrapper runs before <code>sudo</code>, as the user, and lets <code>sudo</code> happen inside the terminal it opened.</p>
+    <p>A related trap when rebuilding: removing an <code>applyPatch</code> line does not un-apply the patch. <code>applyPatch</code> is one-directional and <code>gitPullOrClone</code> pulls into the existing tree, so the next build still contains it. Delete the build directory to force a clean clone, then verify the result rather than the recipe.</p>
+
+    <h3>Replacing the OSD, and what it takes to draw an icon</h3>
+    <p>The volume OSD is a notification daemon on the overlay layer: the wheel daemon publishes its position, a watcher feeds <code>mako</code>, which draws the icon, the percentage and the level as a filled bar. Two things about icons cost time. <code>mako</code>'s icon lookup "approximates the XDG Icon Theme Specification but does not support any of the theme metadata" and searches nothing by default, so a bare icon name resolves to nothing &mdash; pass an absolute path and no lookup happens. And Adwaita's symbolic icons are <code>fill="#2e3436"</code>, near black, drawn for light themes: on a dark panel they render as <em>nothing at all</em>, which on screen is indistinguishable from a missing icon. There is no light variant, no PNG fallback anywhere on the system, and no font here carries a Unicode speaker glyph. Recolouring the SVG is the only route.</p>
+
+    <p><strong>Back up Experimental Pi's binary regardless.</strong> It ships unstripped with debug symbols, making it the best surviving documentation of the XPi protocol — worth having if anyone ever wants to chase the red LED channel or the drawn overlay.</p>
+  </section>
+
+  <section>
+    <div class="eyebrow">Open</div>
+    <h2>What is not solved</h2>
+    <h3>Hiding the status bar during a game wedges the game</h3>
+    <p>Changing a layer surface's mapped state next to a fullscreen client &mdash; hiding the bar while an emulator is running &mdash; intermittently wedges that client permanently. The fingerprint, captured live: the emulator sits at <strong>0.3% of a core</strong> where it should be at 30&ndash;50%, blocked in <code>ppoll</code> on a single fd with <em>nothing</em> queued on any Wayland socket, waiting for a <code>wl_surface.frame</code> callback that never arrives. It ignores <code>SIGTERM</code>; only <code>SIGKILL</code> ends it.</p>
+    <p>The compositor is <strong>not</strong> the thing that is stuck. labwc stays in <code>do_epoll_wait</code>, screen capture still works, two captures seconds apart differ, the bar's own clock keeps ticking &mdash; and the game's last frame is still being composited on screen. Restarting the bar, forcing damage with a notification, and cycling the panel all fail to deliver a callback.</p>
+    <p><strong>The reproduction gap is the real finding.</strong> It happens during ordinary play almost every time and <em>never once</em> in about thirty scripted launches and toggles &mdash; across hiding by killing the bar and by unmapping it, with the exclusive zone on and off, on the specific game that triggered it. Several confident diagnoses were wrong along the way, each "confirmed" by a clean test run that proved only that a rare race had not fired. Scripted testing cannot clear this.</p>
+    <p>So the bar is never hidden during a game. That costs the ~7.7% of a core that hiding it would have reclaimed, and buys a device that does not eat unsaved progress. The auto-hide hooks are written and shipped but deliberately not installed, and a watchdog stays in the tree to capture the next occurrence rather than guess at it. Two lessons worth carrying: <strong>CPU is the only unambiguous signal here</strong> &mdash; a healthy emulator also sits in <code>poll_schedule_timeout</code>, so process state and <code>wchan</code> tell you nothing, while 0.3% against 50% is not a judgement call &mdash; and a passing test against an intermittent fault is not evidence of a fix.</p>
 
     <h3>Two unexplained shutdowns — with a strong candidate</h3>
     <p>The unit powered itself off twice in one session: full battery, ~55 °C, no thermal or under-voltage flags, and the second with a known-good module during nothing more taxing than a <code>systemd-journald</code> restart.</p>
@@ -1256,7 +1330,12 @@ vc_dispmanx_update_submit_sync</code></pre>
     <p>Note also that an unexpected power-off can leave <code>dpkg</code> mid-transaction, after which every package operation fails until <code>sudo dpkg --configure -a</code> is run. Two RetroPie packages failed at their dependency step for exactly this reason, which reads as a build error and is not one.</p>
 
     <h3>Positive charge current has never been observed</h3>
-    <p>Everything about the charge path checks out — VBus detection flips cleanly on unplug, the current reading tracks load and source correctly, and the pack demonstrably holds charge. But <code>amps</code> has never once read above zero, because the pack has been full or near-full every time it was measured. Two minutes on battery produces voltage sag, not depletion. Settling it needs a genuine 20&ndash;30 minute discharge followed by a plug-in, and until then it is unproven whether the sensor reports charge current at all or only discharge.</p>
+    <p>Everything about the charge path checks out — VBus detection flips cleanly on unplug, the current reading tracks load and source correctly, and the pack demonstrably holds charge. But <code>amps</code> has never once read above zero, because the pack has been full or near-full every time it was measured. Two minutes on battery produces voltage sag, not depletion.</p>
+    <p><strong>Still true a month later</strong>, and now it matters more. Sampled on the charger at a full pack: <code>status Full</code>, <code>voltage_now 4200000</code>, <code>current_now −250000</code> — negative while charging. The fuel gauge integrates that value and takes its sign as the direction of charge flow, so if the sensor turns out to report magnitude only, the gauge is integrating a charge as a discharge and every anchor it makes is fighting it. Settling it needs a genuine 20–30 minute discharge followed by a plug-in, which is the same capture the gauge needs for calibration — one session answers both.</p>
+
+    <h3>The fuel gauge has never been calibrated</h3>
+    <p>It runs on generic 1S Li-ion constants and a usable capacity borrowed from someone else's measurement of a stock pack, and it says so on every boot. That is good enough to be better than a voltage lookup and not good enough to trust. Calibration is one full discharge captured to CSV, then a fitter that recovers capacity, pack resistance and the OCV curve from it — per-slice least squares on voltage against current, which works precisely because a handheld's load swings hard on its own and SoC barely moves inside a narrow slice while current does.</p>
+    <p>The one requirement is that the session <strong>mixes menu idling with actual play</strong>: a capture held at one constant load cannot be fitted and is refused rather than silently producing a bad curve.</p>
 
     <h3>NeoGeo is blocked by content, not by software</h3>
     <p>The core is installed and configured; 328 romsets are present. Neither matters. There is no <code>neogeo.zip</code> BIOS anywhere on the card — not as a file, not inside any of the 328 archives — and FBNeo starts no NeoGeo title without it. The backup restored from Experimental Pi's own card did not contain one either, which means NeoGeo never worked on the original machine &mdash; since confirmed directly against a partclone image of that card, whose <code>BIOS/</code> directory holds only <code>skip.bin</code>, <code>fast.bin</code> and <code>system.bin</code>. That image is readable without restoring it anywhere: <code>debugfs -R 'cat /path' root.img</code> reads an ext4 image as an ordinary user, no loop mount and no root. Separately, 295 of the 328 archives were renamed to friendly titles (<code>3countbout.zip</code> holding <code>043-*.rom</code>, which FBNeo knows as <code>3countb</code>), and FBNeo identifies romsets by filename. The cart number inside each archive is a reliable key for renaming them back, but the BIOS is the hard blocker.</p>
