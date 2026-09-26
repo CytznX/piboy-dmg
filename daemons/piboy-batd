@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+"""piboy-batd - a fuel gauge for the XPi pack, to replace the MCU's percent.
+
+The MCU's own `percent` is a voltage lookup. On a handheld that is the one thing
+it cannot be: terminal voltage under load is dominated by IR drop, so the number
+climbs when you drop to the menu and falls when a game starts, and nothing about
+that motion is charge. This integrates current instead, and uses voltage only as
+a slow anchor - the standard complementary filter, and the same approach the
+Batocera port took, arrived at from the same complaint.
+
+What the hardware gives us (driver/xpi_gamecon.c, via power_supply):
+
+    voltage_now   batt_val*5 + 2950 mV   -> 1S Li-ion, 2950..4225 mV, 5 mV steps
+    current_now   (signed char)*50 mA    -> +-6350 mA, 50 mA steps, - = discharge
+    status        derived from VBus, not from the sign of the current
+
+The 50 mA quantisation is the whole design problem. At a typical 600 mA draw one
+LSB is 8% of the reading, and if the MCU truncates rather than rounds, the error
+is a bias rather than noise: up to 50 mA held for six hours is 300 mAh, 7.5% of
+the pack, all in one direction. Coulomb counting alone therefore drifts, however
+carefully it is done, and must be re-anchored against voltage.
+
+Anchoring cannot wait for the pack to rest, because on a Pi 4 it never does -
+idle is still ~450 mA. So OCV is inferred instead:
+
+    OCV = V_terminal - I * R_pack
+
+At 600 mA and 100 mohm that is a 60 mV correction, twelve times the voltage LSB,
+so it is well resolved. The anchor is then weighted by how much the OCV curve is
+actually saying: steep near full and near empty, nearly flat from 30-70%, where
+a millivolt of error is several percent of charge and the anchor is worth little.
+
+Two hard anchors do the real work, and neither needs the curve:
+  * charge termination - status Full means the pack IS full, so set 100%
+  * the persisted state file, for charge carried across a reboot
+
+CALIBRATION. OCV_TABLE and R_PACK_MOHM below are generic 1S Li-ion values, good
+enough to run today and not good enough to trust. CAPACITY_MAH is the Batocera
+port's measurement of a stock pack (~4000 mAh usable against a 4900 mAh label),
+not a measurement of ours. To calibrate against this actual unit:
+
+    piboy-batd --log /var/log/piboy-batt.csv          # one full charge -> shutdown
+    sudo scripts/fit-battery-curve.py /var/log/piboy-batt.csv
+    piboy-batd --replay /var/log/piboy-batt.csv       # check the fit, then restart
+
+The fitter writes /var/lib/piboy/battery-cal.json and this daemon prefers it
+over the constants below, so calibrating never means editing code - which also
+means --replay is checking the same numbers the daemon will actually run.
+
+Output goes to the driver, not to a file of our own: writing a percent to
+/sys/kernel/xpi_gamecon/capacity_override makes POWER_SUPPLY_PROP_CAPACITY
+report it, so EmulationStation, RetroArch, upower, logind and piboy-fand all
+see the good number through the interface they already read. Writing -1 hands
+control back to the MCU, and the driver expires the override after 60s, so
+killing this daemon restores the old behaviour rather than freezing a stale
+percentage on screen.
+
+It also owns the clean shutdown on an empty pack - see the constants below for
+why that lives here rather than in piboy-fand, which keeps only the warnings.
+
+Resuming from the state file is checked, not trusted: the pack may have been
+charged while the handheld was off, and no amount of integrating can discover
+that. The first sample after a resume compares the saved charge against OCV and
+throws it away if they disagree by more than RESUME_TOL_PCT.
+
+Known gap: a resume that survives that check is still a charge recorded before
+an unknown amount of time powered down, during which the board keeps drawing.
+The OCV anchor pulls that back, but slowly - a few minutes on the steep parts of
+the curve, longer on the plateau. If a --replay of a real resume shows that is
+too slow, the fix is a faster anchor for the first minute or two. Measure first.
+"""
+import argparse, csv, json, os, signal, subprocess, sys, time
+
+PSY         = '/sys/class/power_supply/xpi-battery'
+OUT         = '/sys/kernel/xpi_gamecon/capacity_override'
+RAW_PCT     = '/sys/kernel/xpi_gamecon/percent'
+STATE       = '/var/lib/piboy/fuel-gauge.json'
+CAL         = '/var/lib/piboy/battery-cal.json'
+
+CAPACITY_MAH = 4000.0   # usable, NOT the 4900 mAh on the label. See above.
+R_PACK_MOHM  = 100.0    # cell + wiring + connector + protection FET
+SAMPLE_S     = 1.0
+TAU_S        = 300.0    # OCV anchor time constant, at full confidence
+SLOPE_REF    = 10.0     # mV per % at which the OCV anchor is fully trusted
+STEP_MA      = 200.0    # skip the anchor when the load just moved this much
+SAVE_MAH     = CAPACITY_MAH / 100.0   # persist once the estimate moves this far
+SAVE_MAX_S   = 300.0                  # ...and at least this often while draining
+PUBLISH_S    = 20.0                   # refresh the override well inside its 60s expiry
+
+# Clean shutdown on an empty pack. This lives here, not in piboy-fand, because
+# fand exits when pwm1 is unwritable and then burns its systemd start limit -
+# which would make protection against an unclean power cut contingent on the
+# FAN hardware. This daemon owns the gauge, samples every second, and fails for
+# its own reasons only.
+#
+# Two triggers, and they are less redundant than they look. The percentage is
+# this gauge's coulomb-counted estimate; the voltage floor is the raw rail and
+# depends on no calibration at all, so it still fires if the gauge is wrong -
+# which, until a real discharge has been captured, it may well be.
+BATT_SHUTDOWN_PCT = 3       # percent, at or below, while discharging
+SHUTDOWN_SAMPLES  = 10      # consecutive samples (~10s at SAMPLE_S)
+VOLT_FLOOR_MV     = 3300.0  # ~3.36V open-circuit under a 600mA load through
+                            # ~100 mohm, i.e. genuinely empty
+VOLT_SAMPLES      = 30      # ~30s: a load spike sags the rail briefly and must
+                            # not be allowed to power the device off mid-game
+
+# Force the status bar back on when the pack gets this low. Launching a game
+# hides the bar (runcommand-onstart.sh) because `layer: overlay` costs ~7.7% of
+# a core in composition - but the bar is also where the low-battery warning
+# lives, and hiding it would blind the player during the activity that drains
+# fastest. So the saving is given back for the last few percent only.
+# Matches waybar's own `critical` state in waybar.json, deliberately: the bar
+# reappears already pulsing red rather than showing a calm number.
+BAR_SHOW_PCT = 10
+STATUSBAR    = '/opt/retropie/configs/all/wayland/statusbar.sh'
+
+# How far the resumed charge may sit from what OCV says before it is discarded.
+# Wide, because on the 30-70% plateau the generic curve is genuinely poor and a
+# false reseed would throw away a good integration. A pack charged while the
+# handheld was off misses by far more than this.
+RESUME_TOL_PCT = 20
+
+# Resting OCV (mV) at each 1S SoC. Generic LiCoO2/LiPo - replace with a fit.
+OCV_TABLE = [
+    (0,   3300), (5,   3550), (10,  3630), (15,  3670), (20,  3700),
+    (30,  3750), (40,  3790), (50,  3820), (60,  3870), (70,  3950),
+    (80,  4020), (90,  4110), (95,  4150), (100, 4200),
+]
+
+
+def log(msg):
+    print(f'piboy-batd: {msg}', flush=True)
+
+
+def load_cal(path):
+    """Calibration measured on this actual pack. Absent is normal and falls back
+    to the generic constants above; present but malformed is a mistake worth
+    stopping for, rather than silently reverting to numbers that are not ours."""
+    global CAPACITY_MAH, R_PACK_MOHM, OCV_TABLE, SAVE_MAH
+    try:
+        with open(path) as f:
+            c = json.load(f)
+    except OSError:
+        log(f'no {path} - using built-in generic constants, NOT calibrated')
+        return
+    except ValueError as e:              # JSONDecodeError: truncated, half-written
+        sys.exit(f'{path} is not valid JSON: {e}')
+    try:
+        CAPACITY_MAH = float(c['capacity_mah'])
+        R_PACK_MOHM = float(c['r_pack_mohm'])
+        OCV_TABLE = [(float(soc), float(mv)) for soc, mv in c['ocv_table']]
+    except (KeyError, TypeError, ValueError) as e:
+        sys.exit(f'{path} is malformed: {e}')
+    SAVE_MAH = CAPACITY_MAH / 100.0
+    log(f'calibrated from {path}: {CAPACITY_MAH:.0f} mAh, {R_PACK_MOHM:.0f} mohm, '
+        f'{len(OCV_TABLE)} curve points')
+
+
+def read_int(name):
+    """One sysfs integer, or None. A read can fail mid-rmmod; that is not fatal.
+    None is distinct from 0 here - 0 is a legitimate current."""
+    try:
+        with open(f'{PSY}/{name}') as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_raw_pct():
+    """The MCU's own percent, straight from the driver.
+
+    NOT power_supply's `capacity`: once this daemon starts publishing, the
+    driver answers that property with our own override, so logging it would
+    make the calibration capture a recording of ourselves - and --replay would
+    then compare the gauge against the gauge and call it agreement."""
+    try:
+        with open(RAW_PCT) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def read_str(name):
+    try:
+        with open(f'{PSY}/{name}') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def check_table():
+    """A table that is not increasing in both columns cannot be inverted: the
+    bracket search would match the wrong segment and hand back a negative slope,
+    which becomes a negative anchor weight and drives the estimate the wrong way.
+    A fitted table is one paste away from being wrong, so refuse it loudly."""
+    # Fewer than two points is not a curve, and the pairwise loop below would
+    # wave it through: every reading would then hit a clamp and the gauge would
+    # have no anchor at all. A one-slice fit can produce exactly this.
+    if len(OCV_TABLE) < 2:
+        sys.exit(f'OCV_TABLE has {len(OCV_TABLE)} points - need at least 2')
+    for (s0, v0), (s1, v1) in zip(OCV_TABLE, OCV_TABLE[1:]):
+        if s1 <= s0 or v1 < v0:
+            sys.exit(f'OCV_TABLE is not monotonic at ({s0}, {v0}) -> ({s1}, {v1})')
+
+
+def soc_from_ocv(mv):
+    """Invert OCV_TABLE. Returns (soc_percent, local slope in mV per %).
+
+    check_table() guarantees the voltage column is non-decreasing and the two
+    clamps below put mv strictly inside it, so some consecutive pair always
+    brackets it and the loop always returns."""
+    # Clamp to the table's OWN ends, not to 0/100. The built-in table happens to
+    # span the full range, but a fitted one only covers the slices that had
+    # enough load variation to fit - often 8%..92%. Returning 0.0 there would
+    # anchor the gauge to empty with a tenth of the pack left, and trip every
+    # low-battery policy on the device.
+    #
+    # Slope 0, so the anchor is OFF outside the fitted range. Past the ends the
+    # table has no opinion about where the charge is - only that it is at least
+    # this far out - and pulling the estimate to the endpoint at full confidence
+    # would be the same mistake in a smaller size: a genuinely full pack dragged
+    # down to 92% moments after charge termination set it to 100%. The endpoint
+    # SoC is still returned, because seed_from_ocv has to start somewhere, and
+    # the 'Full' hard anchor corrects the top end for free.
+    if mv <= OCV_TABLE[0][1]:
+        return OCV_TABLE[0][0], 0.0
+    if mv >= OCV_TABLE[-1][1]:
+        return OCV_TABLE[-1][0], 0.0
+    for (s0, v0), (s1, v1) in zip(OCV_TABLE, OCV_TABLE[1:]):
+        if v0 <= mv <= v1:
+            if v1 == v0:
+                # Dead flat: this voltage spans a range of charge, so it carries
+                # no information. Slope 0 turns the anchor off here, which is the
+                # honest answer rather than a guess at the midpoint.
+                return (s0 + s1) / 2.0, 0.0
+            frac = (mv - v0) / (v1 - v0)
+            return s0 + frac * (s1 - s0), (v1 - v0) / (s1 - s0)
+
+
+def mah(dt_s, i0, i1):
+    """Charge moved between two current samples, trapezoid. The load genuinely
+    moves between samples, so neither endpoint alone is right."""
+    return (i0 + i1) / 2.0 * (dt_s / 3600.0)
+
+
+class Gauge:
+    """Charge in mAh, integrated and slowly corrected toward the OCV estimate."""
+
+    def __init__(self, charge_mah=None):
+        self.charge = charge_mah          # None until the first sample seeds it
+        self.reported = None
+        self.prev_i = None
+        self.check_resume = charge_mah is not None
+
+    def seed_from_ocv(self, v_mv, i_ma):
+        soc, _ = soc_from_ocv(v_mv - i_ma * R_PACK_MOHM / 1000.0)
+        self.charge = soc / 100.0 * CAPACITY_MAH
+        log(f'seeded from OCV: {soc:.1f}% ({self.charge:.0f} mAh)')
+
+    def update(self, dt, v_mv, i_ma, status):
+        if self.charge is None:
+            self.seed_from_ocv(v_mv, i_ma)
+            self.prev_i = i_ma
+            return self.percent()
+
+        # A resumed charge describes the pack as it was when this daemon last
+        # ran - and the pack may well have been CHARGED since, which is the
+        # ordinary thing to do with a handheld that just shut down empty.
+        # Nothing in the integration can discover that, and percent()'s
+        # never-climb-while-draining rule would then pin the published percent
+        # to the stale low value for the entire session: the device would boot
+        # on a full pack, report 3%, and power itself off ten seconds later.
+        # So check the resumed figure against OCV once, and drop it if the pack
+        # is plainly not where we left it.
+        if self.check_resume:
+            self.check_resume = False
+            soc, _ = soc_from_ocv(v_mv - i_ma * R_PACK_MOHM / 1000.0)
+            stale = self.charge / CAPACITY_MAH * 100.0
+            if abs(soc - stale) > RESUME_TOL_PCT:
+                log(f'resumed at {stale:.0f}% but OCV says {soc:.0f}% - the pack '
+                    f'moved while we were off, discarding the saved charge')
+                self.seed_from_ocv(v_mv, i_ma)
+                self.prev_i = i_ma
+                return self.percent()
+
+        self.charge += mah(dt, self.prev_i if self.prev_i is not None else i_ma,
+                           i_ma)
+
+        # Hard anchor. Charge termination is a statement about the pack, not an
+        # inference from it, so it overrides everything and costs no curve.
+        if status == 'Full':
+            self.charge = CAPACITY_MAH
+        else:
+            self._anchor(dt, v_mv, i_ma)
+
+        self.charge = min(max(self.charge, 0.0), CAPACITY_MAH)
+        self.prev_i = i_ma
+        return self.percent()
+
+    def _anchor(self, dt, v_mv, i_ma):
+        # A load step means the terminal voltage has not settled and the IR model
+        # is being asked about a transient. Wait for the next sample.
+        if self.prev_i is not None and abs(i_ma - self.prev_i) > STEP_MA:
+            return
+
+        soc, slope = soc_from_ocv(v_mv - i_ma * R_PACK_MOHM / 1000.0)
+
+        # Trust the anchor in proportion to what the curve can resolve. On the
+        # 30-70% plateau the slope collapses and so does the weight, which is
+        # correct: there, voltage genuinely does not know the charge.
+        alpha = min(1.0, min(1.0, slope / SLOPE_REF) * dt / TAU_S)
+        self.charge += (soc / 100.0 * CAPACITY_MAH - self.charge) * alpha
+
+    def percent(self):
+        pct = min(max(int(round(self.charge / CAPACITY_MAH * 100.0)), 0), 100)
+        # Never let the displayed number climb while draining. The anchor can
+        # legitimately push the estimate up; showing that is the exact jitter
+        # this daemon exists to remove.
+        if self.reported is not None and self.prev_i is not None \
+                and self.prev_i < 0 and pct > self.reported:
+            pct = self.reported
+        self.reported = pct
+        return pct
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return float(json.load(f)['charge_mah'])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def save_state(charge):
+    """Rename-over-fsync: this one is on the SD card and must survive a crash."""
+    tmp = f'{STATE}.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            f.write(json.dumps({'charge_mah': round(charge, 1)}))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE)
+    except OSError as e:
+        log(f'could not save state: {e}')
+
+
+def run(logfile):
+    if not os.path.isdir(PSY):
+        sys.exit(f'{PSY} not present - is xpi_gamecon loaded?')
+    if not os.access(OUT, os.W_OK):
+        sys.exit(f'{OUT} not writable - old xpi_gamecon without capacity_override?')
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+
+    gauge = Gauge(load_state())
+    if gauge.charge is not None:
+        log(f'resumed at {gauge.charge:.0f} mAh')
+
+    fh = None
+    if logfile:
+        fh = open(logfile, 'a', newline='')
+        writer = csv.writer(fh)
+        if fh.tell() == 0:
+            writer.writerow(['wall', 'mono', 'mv', 'ma', 'mcu_pct', 'status'])
+
+    stop = []
+    signal.signal(signal.SIGTERM, lambda *_: stop.append(True))
+    signal.signal(signal.SIGINT, lambda *_: stop.append(True))
+
+    last = time.monotonic()
+    written = saved_charge = None
+    last_save = last_pub = 0.0
+    low_pct = low_mv = 0
+    bar_forced = False
+    while not stop:
+        time.sleep(SAMPLE_S)
+        now = time.monotonic()
+        dt, last = now - last, now
+
+        uv, ua = read_int('voltage_now'), read_int('current_now')
+        if uv is None or ua is None:
+            continue
+        mv, ma = uv / 1000.0, ua / 1000.0
+        status = read_str('status')
+        if status == 'Unknown':          # no valid packet yet
+            continue
+
+        pct = gauge.update(dt, mv, ma, status)
+
+        # On change, and periodically regardless. The driver drops the override
+        # 60s after the last write so a dead daemon cannot freeze the gauge -
+        # which means a live one has to keep saying so, and on the OCV plateau
+        # the percent can hold still for several minutes. Refreshes are cheap:
+        # the driver only emits a uevent when the value actually changes.
+        if pct != written or now - last_pub > PUBLISH_S:
+            try:
+                with open(OUT, 'w') as f:
+                    f.write(f'{pct}\n')
+                written, last_pub = pct, now
+            except OSError as e:
+                log(f'could not write {OUT}: {e}')
+
+        if fh:
+            writer.writerow([f'{time.time():.1f}', f'{now:.1f}', f'{mv:.0f}',
+                             f'{ma:.0f}', read_raw_pct(), status])
+            fh.flush()
+
+        # The state file is on the SD card, so persist on real movement rather
+        # than on a timer: 1% of the pack, with a ceiling so a slow drain still
+        # checkpoints. A clean stop saves below; only a yanked battery loses it.
+        if saved_charge is None or abs(gauge.charge - saved_charge) >= SAVE_MAH \
+                or (now - last_save > SAVE_MAX_S and gauge.charge != saved_charge):
+            save_state(gauge.charge)
+            saved_charge, last_save = gauge.charge, now
+
+        # The shutdown watches the gauge's own estimate, not the number we
+        # publish: percent() deliberately refuses to let the displayed value
+        # climb while draining, and a smoothing rule for a display must never be
+        # the thing that decides to cut power.
+        est_pct = gauge.charge / CAPACITY_MAH * 100.0
+
+        # Edge-triggered, not level-triggered: forced ONCE per excursion below
+        # the threshold, so the player can still hide the bar again by hand
+        # afterwards and it will stay hidden. Re-arms when the pack is no
+        # longer discharging, i.e. when it is put back on the charger.
+        if status == 'Discharging' and est_pct <= BAR_SHOW_PCT:
+            if not bar_forced:
+                bar_forced = True
+                log(f'battery {est_pct:.0f}% - forcing the status bar back on')
+                subprocess.run([STATUSBAR, 'show'], check=False,
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+        else:
+            bar_forced = False
+
+        if status == 'Discharging':
+            low_pct = low_pct + 1 if est_pct <= BATT_SHUTDOWN_PCT else 0
+            low_mv = low_mv + 1 if mv <= VOLT_FLOOR_MV else 0
+            if low_pct >= SHUTDOWN_SAMPLES or low_mv >= VOLT_SAMPLES:
+                log(f'battery empty ({est_pct:.1f}%, {mv:.0f} mV) - powering off')
+                save_state(gauge.charge)
+                # Hand capacity back before the frontend sees a dying system, so
+                # a reboot does not start up believing the override.
+                try:
+                    with open(OUT, 'w') as f:
+                        f.write('-1\n')
+                except OSError:
+                    pass
+                subprocess.run(['systemctl', 'poweroff'], check=False)
+                return
+        else:
+            low_pct = low_mv = 0
+
+    save_state(gauge.charge)
+    # Hand capacity back to the MCU rather than leaving our last value to expire.
+    try:
+        with open(OUT, 'w') as f:
+            f.write('-1\n')
+    except OSError:
+        pass
+    if fh:
+        fh.close()
+    log('stopped')
+
+
+def replay(path):
+    """Re-run the filter over a logged discharge. The only way to check a change
+    to the model without spending a battery on it."""
+    gauge, rows = Gauge(), []
+    with open(path) as f:
+        for r in csv.DictReader(f):
+            rows.append((float(r['mono']), float(r['mv']), float(r['ma']),
+                         int(r['mcu_pct'] or 0), r['status']))
+    if not rows:
+        sys.exit('no rows')
+
+    print(f'{"hours":>7} {"mV":>6} {"mA":>7} {"mcu%":>5} {"gauge%":>7}')
+    prev_t, drawn = rows[0][0], 0.0
+    step = max(1, len(rows) // 40)
+    for n, (t, mv, ma, mcu, status) in enumerate(rows):
+        dt = t - prev_t
+        drawn -= mah(dt, rows[max(n - 1, 0)][2], ma)
+        pct = gauge.update(dt, mv, ma, status)
+        prev_t = t
+        if n % step == 0:
+            print(f'{(t - rows[0][0]) / 3600:7.2f} {mv:6.0f} {ma:7.0f} '
+                  f'{mcu:5d} {pct:7d}')
+
+    print(f'\n{(rows[-1][0] - rows[0][0]) / 3600:.2f} h, {drawn:.0f} mAh drawn, '
+          f'gauge ended at {gauge.percent()}%, MCU at {rows[-1][3]}%')
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    g = ap.add_mutually_exclusive_group()
+    g.add_argument('--log', metavar='CSV', help='also append raw samples, for calibration')
+    g.add_argument('--replay', metavar='CSV', help='re-run the filter over a log and exit')
+    ap.add_argument('--cal', metavar='JSON', default=CAL,
+                    help=f'calibration from fit-battery-curve.py (default {CAL})')
+    a = ap.parse_args()
+    load_cal(a.cal)
+    check_table()
+    replay(a.replay) if a.replay else run(a.log)
+
+
+if __name__ == '__main__':
+    main()

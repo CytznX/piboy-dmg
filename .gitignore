@@ -40,3 +40,13 @@ capture.log
 verify-diff.txt
 duplicates-found.txt
 partition-table.sfdisk
+
+# Experimental Pi's recovered download server (archive.org EXPPI), mirrored to
+# docs/ for reference. Same reasoning as /vendor-osd/ above: 30MB of THEIR
+# proprietary material - the Windows utility, signed USB drivers, firmware
+# blobs - and this repo is public. It is preserved outside git alongside the
+# card image, in ~/.local/share/piboy-backup-image/exppi-archive/.
+/docs/experimentalpi-mirror/
+
+# stray in-place backups the *.pre-* rule above misses (no hyphen)
+*.c.pre*

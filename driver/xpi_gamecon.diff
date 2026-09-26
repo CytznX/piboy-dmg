@@ -1,5 +1,5 @@
---- a/xpi_gamecon.c
-+++ b/xpi_gamecon.c
+--- /tmp/claude-1000/-home-mseifert-Dropbox-piboy-dmg/1da229e8-7e98-41b2-b3a8-5cd74675c8b9/scratchpad/xpi_gamecon.c.orig	2026-08-22 20:05:42.706977268 -0400
++++ /tmp/claude-1000/-home-mseifert-Dropbox-piboy-dmg/1da229e8-7e98-41b2-b3a8-5cd74675c8b9/scratchpad/xpi_gamecon.c	2026-08-23 00:42:38.084070631 -0400
 @@ -3,9 +3,23 @@
  #include <linux/of_device.h>
  #include <linux/module.h>
@@ -24,7 +24,7 @@
  MODULE_AUTHOR("Nathan Scherdin");
  MODULE_DESCRIPTION("PiBoy DMG Controls driver");
  MODULE_LICENSE("GPL");
-@@ -17,6 +31,35 @@
+@@ -17,6 +31,26 @@
  static const int gc_data_bit = 1<<27;
  
  static unsigned long lastgood=0;
@@ -36,16 +36,8 @@
 +static struct power_supply *xpi_psy;
 +static int xpi_psy_last_pct = -1;
 +static int xpi_psy_last_sign = -2;
-+static int xpi_psy_last_vbus = -1;	/* status depends on VBus now, so changes must notify */
-+static struct power_supply *xpi_usb;	/* the wall supply, so userspace knows it is plugged in */
 +
 +#define XPI_STAT_SHUTDOWN	0x40	/* active-low in stat_val */
-+#define XPI_STAT_VBUS		0x80	/* wall power present */
-+/* Current arrives as a signed char scaled by 50mA, so one LSB is 50mA. A full
-+ * pack sitting on a charger dithers across zero by exactly that much; without a
-+ * deadband the status flaps Full/Discharging and every flip emits a uevent.
-+ * Treat anything inside one LSB as zero. */
-+#define XPI_CUR_DEADBAND	50
 +#define XPI_PWR_BACKSTOP_S	8	/* XPi cuts the rail at ~31s; act well before that */
 +
 +/* Fan fail-safe. Nothing controls the fan between module load and multi-user,
@@ -55,12 +47,11 @@
 +#define XPI_FAN_SAFE		64
 +#define XPI_FAN_TIMEOUT		(30 * HZ)
 +static unsigned long xpi_fan_last_set;
-+static int xpi_fan_enable = 2;
-+static bool xpi_led_ok;		/* hwmon pwm1_enable: 0=full speed, 1=manual, 2=manual+floor */
++static int xpi_fan_enable = 1;		/* hwmon pwm1_enable: 0 = kernel floor, 1 = manual */
  static unsigned long lasterror=0;
  
  static uint8_t index;
-@@ -48,7 +91,52 @@
+@@ -48,7 +82,26 @@
  
  #define GC_REFRESH_TIME	(HZ/120)
  
@@ -72,24 +63,7 @@
 + *   cost/tick ~= 192 * bitrate microseconds; at 125Hz that is 2.4% of a core per us.
 + */
 +static int gc_bitrate = 7;
-+#define XPI_BITRATE_MIN 1
-+#define XPI_BITRATE_MAX 50
-+static int gc_bitrate_set(const char *val, const struct kernel_param *kp)
-+{
-+	int v, ret = kstrtoint(val, 0, &v);
-+
-+	if (ret)
-+		return ret;
-+	if (v < XPI_BITRATE_MIN || v > XPI_BITRATE_MAX)
-+		return -EINVAL;
-+	WRITE_ONCE(gc_bitrate, v);
-+	return 0;
-+}
-+static const struct kernel_param_ops gc_bitrate_ops = {
-+	.set = gc_bitrate_set,
-+	.get = param_get_int,
-+};
-+module_param_cb(bitrate, &gc_bitrate_ops, &gc_bitrate, 0644);
++module_param_named(bitrate, gc_bitrate, int, 0644);
 +MODULE_PARM_DESC(bitrate, "GPIO clock half-period in us (default 7)");
 +
 +/* Cumulative, never reset - lastgood/lasterror are consecutive-run counters and
@@ -101,20 +75,11 @@
 +module_param_named(pkt_crc, gc_pkt_crc, ulong, 0444);
 +MODULE_PARM_DESC(pkt_crc, "cumulative packets failing CRC");
 +
-+/* Bounded hard. gc_timer() issues ~230 udelay(BITRATE) calls per tick at ~125Hz,
-+ * so an unbounded value busy-spins longer than the timer period and pins a core
-+ * in softirq; a large one soft-locks the machine outright (and udelay() itself
-+ * overflows above MAX_UDELAY_MS anyway). Read once so a concurrent write to the
-+ * module parameter cannot slip an out-of-range value past the check. */
-+static inline int gc_bitrate_get(void)
-+{
-+	return clamp(READ_ONCE(gc_bitrate), XPI_BITRATE_MIN, XPI_BITRATE_MAX);
-+}
-+#define BITRATE gc_bitrate_get()
++#define BITRATE (gc_bitrate < 1 ? 1 : gc_bitrate)
  
  static volatile unsigned *gpio;
  
-@@ -68,7 +156,7 @@
+@@ -68,7 +121,7 @@
  				BTN_TL, //Left Trigger
  				BTN_TR, //Right Trigger
  			};
@@ -123,51 +88,16 @@
  
  struct gc {
  	struct input_dev *dev;
-@@ -90,7 +178,24 @@
+@@ -90,7 +143,7 @@
  static ssize_t green_store(struct kobject *kobj, struct kobj_attribute *attr,const char *buf, size_t count) { sscanf(buf,"%d",&values.green_val); return count; }
  
  static ssize_t fan_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf){ return sprintf(buf, "%d", values.fan_val); }
 -static ssize_t fan_store(struct kobject *kobj, struct kobj_attribute *attr,const char *buf, size_t count) { sscanf(buf,"%d",&values.fan_val); return count; }
-+/* Clamped, unlike Experimental Pi original. An unclamped value is worse than merely
-+ * wrong: the wire byte is (unsigned char)val, so writing 256 transmits 0 - fan
-+ * fully off - while values.fan_val reads 256, which makes the safety floor's
-+ * "values.fan_val < XPI_FAN_SAFE" test false AND stamps xpi_fan_last_set, so the
-+ * 30s watchdog meant to catch a dead governor believes one is alive. The fan then
-+ * stays off with its own backstop defeated. hwmon's pwm1_store already clamps;
-+ * this duplicate path did not. Only a valid write refreshes the watchdog. */
-+static ssize_t fan_store(struct kobject *kobj, struct kobj_attribute *attr,
-+			 const char *buf, size_t count)
-+{
-+	int v;
-+
-+	if (kstrtoint(buf, 0, &v))
-+		return -EINVAL;
-+	values.fan_val = clamp(v, 0, 255);
-+	xpi_fan_last_set = jiffies;
-+	return count;
-+}
++static ssize_t fan_store(struct kobject *kobj, struct kobj_attribute *attr,const char *buf, size_t count) { sscanf(buf,"%d",&values.fan_val); xpi_fan_last_set = jiffies; return count; }
  
  static ssize_t cur_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf){ return sprintf(buf, "%d", cur_val); }
  static ssize_t cur_store(struct kobject *kobj, struct kobj_attribute *attr,const char *buf, size_t count) { sscanf(buf,"%d",&cur_val); return count; }
-@@ -109,7 +214,16 @@
- 
- struct kobj_attribute version = __ATTR(version, 0440, version_show, version_store);
- struct kobj_attribute flags = __ATTR(flags, 0660, flags_show, flags_store);
--struct kobj_attribute red = __ATTR(red, 0660, red_show, red_store);
-+/* Read-only on purpose. The driver does transmit red_val - the protocol
-+ * round-robins flags/fan/red/green, one per packet, and red goes out as
-+ * selector 0xC2 every fourth packet. The XPi simply ignores it, because
-+ * that channel is firmware-owned: Experimental Pi documents the single
-+ * bi-colour LED going green -> yellow -> red as the pack drops below 25%,
-+ * and it lights even with no Pi communicating at all. A writable node that
-+ * silently does nothing sent two separate investigations down a dead end,
-+ * so expose the value, not the illusion of control. Green is ours and is
-+ * registered properly as a leds classdev. */
-+struct kobj_attribute red = __ATTR(red, 0440, red_show, red_store);
- struct kobj_attribute green = __ATTR(green, 0660, green_show, green_store);
- struct kobj_attribute fan = __ATTR(fan, 0660, fan_show, fan_store);
- struct kobj_attribute cur = __ATTR(amps, 0660, cur_show, cur_store);
-@@ -162,9 +276,20 @@
+@@ -162,9 +215,20 @@
  	data[len+1] = crc&0xFF;
  }
  
@@ -189,7 +119,7 @@
  
  	unsigned char data[32];
  	struct input_dev *dev = gc->dev;
-@@ -240,6 +365,7 @@
+@@ -240,6 +304,7 @@
  		}
  
  		lastgood++;
@@ -197,7 +127,7 @@
  
  		input_report_abs(dev, ABS_X, (int16_t)data[1]);		//X Axis
  		input_report_abs(dev, ABS_Y, (int16_t)data[2]);		//Y Axis
-@@ -266,13 +392,82 @@
+@@ -266,13 +331,69 @@
  		cur_val = (int)((signed char)data[8])*50;	//Current
  		percent_val = data[9];				//battery percentage
  		stat_val = data[5]&0xC6;			//VBus,Shutdown,VSTAT2,VSTAT1
@@ -227,13 +157,8 @@
 +		 * what this guard exists to prevent. */
 +		/* Fan fail-safe: if nobody has set pwm1 recently the governor is gone
 +		 * (not started yet, crashed, or stopped) - hold a safe floor. */
-+		if (xpi_fan_enable == 0) {
-+			/* Standard hwmon meaning of pwm1_enable=0: no speed control,
-+			 * i.e. full speed. fancontrol writes this on abort expecting
-+			 * exactly that, so it must not mean "hold a low floor". */
-+			values.fan_val = 255;
-+		} else if (xpi_fan_enable == 2 &&
-+			   time_after(jiffies, xpi_fan_last_set + XPI_FAN_TIMEOUT)) {
++		if (xpi_fan_enable == 0 ||
++		    time_after(jiffies, xpi_fan_last_set + XPI_FAN_TIMEOUT)) {
 +			if (values.fan_val < XPI_FAN_SAFE)
 +				values.fan_val = XPI_FAN_SAFE;
 +		}
@@ -242,21 +167,13 @@
 +		 * actually changed. Unconditionally at 125Hz this would emit a uevent
 +		 * per tick - a netlink broadcast and udev wakeup 125 times a second. */
 +		{
-+			int sign = (cur_val > XPI_CUR_DEADBAND) - (cur_val < -XPI_CUR_DEADBAND);
-+			int vbus = !!(stat_val & XPI_STAT_VBUS);
++			int sign = (cur_val > 0) - (cur_val < 0);
 +
-+			if (percent_val != xpi_psy_last_pct ||
-+			    sign != xpi_psy_last_sign || vbus != xpi_psy_last_vbus) {
-+				bool vbus_changed = (vbus != xpi_psy_last_vbus);
-+
++			if (percent_val != xpi_psy_last_pct || sign != xpi_psy_last_sign) {
 +				xpi_psy_last_pct = percent_val;
 +				xpi_psy_last_sign = sign;
-+				xpi_psy_last_vbus = vbus;
 +				if (xpi_psy)
 +					power_supply_changed(xpi_psy);
-+				/* Only the wall supply's consumers care about this one. */
-+				if (vbus_changed && xpi_usb)
-+					power_supply_changed(xpi_usb);
 +			}
 +		}
 +
@@ -281,7 +198,7 @@
  		//printk(KERN_INFO "XPi Gamecon CRC Error: %4.4lu %4.4lu %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x %2.2x",
  		//	lastgood,lasterror, 
  		//	data[0],data[1],data[2],data[3],
-@@ -426,6 +621,187 @@
+@@ -426,6 +547,142 @@
  	printk(KERN_INFO "Executing OSD: %i",result);
  }
  
@@ -329,7 +246,7 @@
 +{
 +	unsigned long v;
 +
-+	if (kstrtoul(buf, 10, &v) || v > 2)
++	if (kstrtoul(buf, 10, &v) || v > 1)
 +		return -EINVAL;
 +	xpi_fan_enable = v;
 +	xpi_fan_last_set = jiffies;
@@ -381,22 +298,16 @@
 +		val->intval = valid;
 +		break;
 +	case POWER_SUPPLY_PROP_STATUS:
-+		/* Derive from VBus first. Inferring direction from the sign of the
-+		 * current alone made a full pack on a charger oscillate between Full
-+		 * and Discharging on a single LSB of dither - the hardware was
-+		 * reporting VBus the whole time and nothing looked at it. */
 +		if (!valid)
 +			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
-+		else if (!(stat_val & XPI_STAT_VBUS))
-+			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
-+		else if (pct >= 100)
++		else if (pct >= 100 && cur >= 0)
 +			val->intval = POWER_SUPPLY_STATUS_FULL;
-+		else if (cur < -XPI_CUR_DEADBAND)
-+			/* Plugged in and still net-draining: the load exceeds what the
-+			 * supply delivers. Genuinely discharging, and worth surfacing. */
++		else if (cur > 0)
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++		else if (cur < 0)
 +			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
 +		else
-+			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
 +		break;
 +	case POWER_SUPPLY_PROP_CAPACITY:
 +		val->intval = valid ? clamp(pct, 0, 100) : 100;
@@ -427,61 +338,10 @@
 +	.get_property	= xpi_psy_get_prop,
 +};
 +
-+/* Nothing on the system could tell wall power from battery, because only a
-+ * battery was registered. upower, logind and anything with a power policy look
-+ * for a supply of type MAINS/USB carrying an "online" property - so provide one. */
-+static enum power_supply_property xpi_usb_props[] = {
-+	POWER_SUPPLY_PROP_ONLINE,
-+};
-+
-+static int xpi_usb_get_prop(struct power_supply *psy,
-+			    enum power_supply_property psp,
-+			    union power_supply_propval *val)
-+{
-+	bool valid = READ_ONCE(xpi_psy_valid);
-+
-+	if (psp != POWER_SUPPLY_PROP_ONLINE)
-+		return -EINVAL;
-+
-+	/* Pairs with the smp_wmb() in gc_timer(), exactly as xpi_psy_get_prop()
-+	 * does. && sequences evaluation, not memory: without this the stat_val
-+	 * load may be observed ahead of the flag load on a weakly-ordered arm64,
-+	 * so a read racing the first good packet can see valid == true with a
-+	 * stale stat_val == 0 and report offline while on wall power. */
-+	if (valid)
-+		smp_rmb();
-+
-+	/* Before the first good packet stat_val is 0, which would read as
-+	 * unplugged. Report offline rather than guess, matching the way capacity
-+	 * is faked to a safe value over the same window. */
-+	val->intval = valid && (stat_val & XPI_STAT_VBUS) ? 1 : 0;
-+	return 0;
-+}
-+
-+static const struct power_supply_desc xpi_usb_desc = {
-+	.name		= "xpi-usb",
-+	.type		= POWER_SUPPLY_TYPE_USB,
-+	.properties	= xpi_usb_props,
-+	.num_properties	= ARRAY_SIZE(xpi_usb_props),
-+	.get_property	= xpi_usb_get_prop,
-+};
-+
  static int __init gc_init(void)
  {
  	/* BCM board peripherals address base */
-@@ -435,6 +811,11 @@
- 	values.fan_val = 10;
- 	values.red_val = 100;
- 	values.green_val = 100;
-+	/* Seed the fan watchdog stamp as already-expired. Left at 0 it is compared
-+	 * against jiffies, which starts at INITIAL_JIFFIES (a large value near
-+	 * wraparound), so time_after() stays false for ~300s on 32-bit - exactly the
-+	 * boot window the floor exists to cover. */
-+	xpi_fan_last_set = jiffies - XPI_FAN_TIMEOUT;
- 
- 	osd();
- 
-@@ -501,6 +882,72 @@
+@@ -501,6 +758,60 @@
  		goto r_sysfs;
  	}
  
@@ -491,9 +351,7 @@
 +		xpi_vol_dev->phys = "xpi/input1";
 +		xpi_vol_dev->id.bustype = BUS_HOST;
 +		__set_bit(EV_ABS, xpi_vol_dev->evbit);
-+				/* input_defuzz_abs_event() hard-drops only |delta| < fuzz/2 and averages
-+		 * the rest, so this damps the ADC dither rather than eliminating it.
-+		 * Consumers should still treat near-zero as mute. */
++				/* fuzz/2 is the drop threshold, so 5 rejects the +-2 ADC dither */
 +		input_set_abs_params(xpi_vol_dev, ABS_VOLUME, 0, 100, 5, 0);
 +		if (input_register_device(xpi_vol_dev)) {
 +			input_free_device(xpi_vol_dev);
@@ -525,8 +383,6 @@
 +	xpi_green_led.brightness_set = xpi_green_set;
 +	if (led_classdev_register(NULL, &xpi_green_led))
 +		printk(KERN_INFO "xpi_gamecon: green LED classdev failed\n");
-+	else
-+		xpi_led_ok = true;
 +
 +	xpi_hwmon = hwmon_device_register_with_groups(NULL, "piboy", NULL,
 +						      xpi_hwmon_groups);
@@ -543,18 +399,10 @@
 +		printk(KERN_INFO "xpi_gamecon: registered /sys/class/power_supply/xpi-battery\n");
 +	}
 +
-+	xpi_usb = power_supply_register(NULL, &xpi_usb_desc, NULL);
-+	if (IS_ERR(xpi_usb)) {
-+		printk(KERN_INFO "xpi_gamecon: xpi-usb register failed (%ld)\n", PTR_ERR(xpi_usb));
-+		xpi_usb = NULL;
-+	} else {
-+		printk(KERN_INFO "xpi_gamecon: registered /sys/class/power_supply/xpi-usb\n");
-+	}
-+
  	printk(KERN_INFO "Device Driver Insert...Done!!!\n");
  
  	mod_timer(&gc_base->timer, jiffies + GC_REFRESH_TIME);
-@@ -509,16 +956,6 @@
+@@ -509,16 +820,6 @@
  
  r_sysfs:
  	kobject_put(kobj_ref);
@@ -571,7 +419,7 @@
  
  	if (gc_base)
  		gc_remove(gc_base);
-@@ -531,23 +968,33 @@
+@@ -531,23 +832,29 @@
  static void __exit gc_exit(void)
  {
  	if (gc_base){
@@ -580,17 +428,13 @@
  		gc_remove(gc_base);
  	}
  
-+	if (xpi_usb)
-+		power_supply_unregister(xpi_usb);
-+
 +	if (xpi_psy)
 +		power_supply_unregister(xpi_psy);
 +
 +	if (xpi_hwmon)
 +		hwmon_device_unregister(xpi_hwmon);
 +
-+	if (xpi_led_ok)
-+		led_classdev_unregister(&xpi_green_led);
++	led_classdev_unregister(&xpi_green_led);
 +
 +	GC_DEL_TIMER_SYNC(&xpi_pwr_timer);
 +

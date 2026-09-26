@@ -1,0 +1,35 @@
+# Installed as /etc/default/piboy-batd. Read by piboy-batd.service.
+#
+# Normal running needs nothing here. The gauge loads its calibration from
+# /var/lib/piboy/battery-cal.json if present, and falls back to the generic
+# constants compiled into the daemon otherwise - it says which, on startup:
+#
+#     journalctl -u piboy-batd -n 5
+#
+# TO CALIBRATE THIS PACK
+#
+# 1. Charge to full, then uncomment the line below and restart:
+#
+#        sudo systemctl restart piboy-batd
+#
+# 2. Use the handheld normally until it shuts itself down. The fit needs the
+#    load to VARY - menu idling and actual play both - because it recovers pack
+#    resistance from how voltage moves against current within a slice of charge.
+#    A session held at one constant load cannot be fitted and will be refused.
+#
+# 3. Charge back up, boot, and fit:
+#
+#        sudo /home/cytzenx/piboy-src/fit-battery-curve.py /var/log/piboy-batt.csv
+#
+#    That writes /var/lib/piboy/battery-cal.json. Check it before trusting it:
+#
+#        piboy-batd --replay /var/log/piboy-batt.csv
+#
+# 4. Empty BATD_ARGS again and restart. The daemon picks up the calibration on
+#    its next start; no file needs editing by hand.
+#
+# Set, rather than commented out: systemd logs a warning on every start for a
+# referenced-but-unset variable, and that noise outlives the one time it is useful.
+BATD_ARGS=
+# To capture, swap the line above for:
+#BATD_ARGS=--log /var/log/piboy-batt.csv

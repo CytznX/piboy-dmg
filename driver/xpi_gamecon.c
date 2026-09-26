@@ -4,7 +4,6 @@
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/of.h>
-#include <linux/version.h>
 #include <linux/timer.h>
 #include <linux/power_supply.h>
 #include <linux/leds.h>
@@ -12,7 +11,8 @@
 #include <linux/reboot.h>
 #include <linux/backlight.h>
 
-/* Renamed in 6.11; the driver still has to build on the 5.10 it came from. */
+/* Renamed in 6.11. Kept as a shim for 6.2..6.10; the floor is 6.2 now, because
+ * gc_exit() uses timer_shutdown_sync(). */
 #ifndef BACKLIGHT_POWER_ON
 #define BACKLIGHT_POWER_ON  FB_BLANK_UNBLANK
 #define BACKLIGHT_POWER_OFF FB_BLANK_POWERDOWN
@@ -29,13 +29,6 @@
 #define XPI_FLAG_REBOOT  0x80
 
 #include <asm/io.h>
-
-/* --- kernel API compatibility shims (5.10 .. 6.18+) --- */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,15,0)
-#define GC_DEL_TIMER_SYNC(t) timer_delete_sync(t)
-#else
-#define GC_DEL_TIMER_SYNC(t) del_timer_sync(t)
-#endif
 
 MODULE_AUTHOR("Nathan Scherdin");
 MODULE_DESCRIPTION("PiBoy DMG Controls driver");
@@ -68,13 +61,34 @@ static struct power_supply *xpi_usb;	/* the wall supply, so userspace knows it i
 #define XPI_CUR_DEADBAND	50
 #define XPI_PWR_BACKSTOP_S	8	/* XPi cuts the rail at ~31s; act well before that */
 
-/* Fan fail-safe. Nothing controls the fan between module load and multi-user,
- * and if the userspace governor dies the duty simply freezes. Rather than trust
- * a daemon with thermal management, hold a floor in the kernel whenever nobody
- * has written pwm1 recently. 64/255 is the same value the daemon uses on exit. */
-#define XPI_FAN_SAFE		64
+/* THE FAN BYTE IS POWER IN TENTHS OF A PERCENT, NOT A LINEAR 0-255 PWM.
+ * 0..254 means 0.0%..25.4%; 255 alone means 100%. Experimental Pi say so in
+ * both their firmware changelog (1.0.3) and the osd.cfg they shipped - see
+ * docs/experimentalpi-mirror/downloads/. Their own default curve runs
+ * 45C:0 50C:75 55C:110 60C:147 65C:194 70C:242, i.e. it tops out at 24.2% and
+ * never uses 255 at all.
+ *
+ * Everything here previously read the byte as linear 0-255, which made every
+ * value about four times weaker than intended: the "64/255 = 25%" fail-safe
+ * below was really 6.4%, less air than the vendor's lowest non-zero band. */
+#define XPI_FAN_FULL		255	/* the discontinuous 100% override */
+#define XPI_FAN_SAFE		150	/* 15.0% - above the vendor's 60C band */
 #define XPI_FAN_TIMEOUT		(30 * HZ)
 static unsigned long xpi_fan_last_set;
+
+/* Userspace capacity override. The MCU's percent is a bare voltage lookup, so
+ * on a handheld it tracks load rather than charge. piboy-batd coulomb-counts a
+ * real estimate in userspace - floating point and a calibration table have no
+ * business in here - and publishes it through capacity_override; the
+ * power_supply CAPACITY property then prefers it, so ES, RetroArch, upower and
+ * logind all get the good number without knowing the daemon exists.
+ *
+ * Writing -1 hands control back to the MCU, and the value expires on the same
+ * reasoning as the fan floor: a daemon that dies must not leave a frozen
+ * percentage behind, because a stale battery reading is worse than a crude one. */
+#define XPI_CAP_TIMEOUT		(60 * HZ)
+static int xpi_cap_override = -1;
+static unsigned long xpi_cap_last_set;
 static int xpi_fan_enable = 2;
 static bool xpi_led_ok;		/* hwmon pwm1_enable: 0=full speed, 1=manual, 2=manual+floor */
 static unsigned long lasterror=0;
@@ -209,7 +223,7 @@ static ssize_t fan_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 	if (kstrtoint(buf, 0, &v))
 		return -EINVAL;
-	values.fan_val = clamp(v, 0, 255);
+	values.fan_val = clamp(v, 0, XPI_FAN_FULL);
 	xpi_fan_last_set = jiffies;
 	return count;
 }
@@ -248,6 +262,32 @@ struct kobj_attribute batt = __ATTR(battery, 0660, batt_show, batt_store);
 struct kobj_attribute per = __ATTR(percent, 0660, percent_show, percent_store);
 struct kobj_attribute stat = __ATTR(status, 0660, stat_show, stat_store);
 struct kobj_attribute vol = __ATTR(volume, 0660, vol_show, vol_store);
+
+static ssize_t cap_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", xpi_cap_override);
+}
+
+static ssize_t cap_store(struct kobject *kobj, struct kobj_attribute *attr,
+			 const char *buf, size_t count)
+{
+	int v;
+	bool changed;
+
+	if (kstrtoint(buf, 0, &v) || v < -1 || v > 100)
+		return -EINVAL;
+	changed = (v != xpi_cap_override);
+	xpi_cap_override = v;
+	xpi_cap_last_set = jiffies;
+	/* Only on a real change. The daemon rewrites the same value periodically to
+	 * keep it from expiring, and a uevent per refresh would wake every consumer
+	 * for nothing. The gc_timer() uevent cannot cover this: it watches the MCU's
+	 * percent, which no longer moves the reported capacity. */
+	if (changed && xpi_psy)
+		power_supply_changed(xpi_psy);
+	return count;
+}
+struct kobj_attribute cap = __ATTR(capacity_override, 0660, cap_show, cap_store);
 
 void gpio_func(int pin, int state)
 {
@@ -343,7 +383,12 @@ static void gc_timer(struct timer_list *t)
 			unsigned char val;
 			len = 2;
 			version_val = 0x0100;
-			val = values.fan_val | (values.flags_val&0x1 ? 0x00 : 0x80);
+			/* v1.00 packs panel-off into bit 7 of the fan byte, so the fan
+			 * only has 7 bits here. Mask rather than let a value >= 128
+			 * forge a dark panel and a truncated duty - the fan curve
+			 * reaches 254, and the safety floor is 150. */
+			val = (values.fan_val & 0x7F) |
+			      (values.flags_val&0x1 ? 0x00 : 0x80);
 			data[GC_LENGTH] = val;
 			data[GC_LENGTH+1] = ~val;
 			data[GC_LENGTH+2] = 0;
@@ -439,11 +484,23 @@ static void gc_timer(struct timer_list *t)
 			/* Standard hwmon meaning of pwm1_enable=0: no speed control,
 			 * i.e. full speed. fancontrol writes this on abort expecting
 			 * exactly that, so it must not mean "hold a low floor". */
-			values.fan_val = 255;
+			values.fan_val = XPI_FAN_FULL;
 		} else if (xpi_fan_enable == 2 &&
 			   time_after(jiffies, xpi_fan_last_set + XPI_FAN_TIMEOUT)) {
 			if (values.fan_val < XPI_FAN_SAFE)
 				values.fan_val = XPI_FAN_SAFE;
+		}
+
+		/* Retire a stale override. Doing it here rather than in the getter
+		 * means there is one owner of the rule and, more importantly, that
+		 * somebody announces it: a passive check would silently revert to
+		 * the MCU value while upower and ES kept displaying the dead
+		 * daemon's last number until something else happened to change. */
+		if (xpi_cap_override >= 0 &&
+		    time_after(jiffies, xpi_cap_last_set + XPI_CAP_TIMEOUT)) {
+			xpi_cap_override = -1;
+			if (xpi_psy)
+				power_supply_changed(xpi_psy);
 		}
 
 		/* Tell power_supply consumers only when something they can observe
@@ -651,7 +708,13 @@ static void xpi_green_set(struct led_classdev *cdev, enum led_brightness b)
 }
 
 /* --- hwmon: expose the fan as a standard pwm1 so `sensors`, fancontrol and
- *     anything else generic can drive it, rather than a private sysfs int. --- */
+ *     anything else generic can drive it, rather than a private sysfs int.
+ *
+ * Caveat worth knowing before trusting a generic tool here: pwm1 is passed
+ * straight through to the MCU, and the MCU's units are tenths of a percent of
+ * power (see the note by XPI_FAN_SAFE). So 0..254 IS monotonic and usable - it sweeps
+ * 0%..25.4% - but 255 is not "one step above 254", it is a jump to 100%. A
+ * pwmconfig sweep therefore looks sane until the very last code. --- */
 static struct device *xpi_hwmon;
 
 static ssize_t pwm1_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -666,7 +729,7 @@ static ssize_t pwm1_store(struct device *dev, struct device_attribute *attr,
 
 	if (kstrtoul(buf, 10, &v))
 		return -EINVAL;
-	values.fan_val = min_t(unsigned long, v, 255);
+	values.fan_val = min_t(unsigned long, v, XPI_FAN_FULL);
 	xpi_fan_last_set = jiffies;
 	return count;
 }
@@ -752,7 +815,12 @@ static int xpi_psy_get_prop(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_STATUS_CHARGING;
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = valid ? clamp(pct, 0, 100) : 100;
+		/* gc_timer() clears the override when it goes stale, so this is a
+		 * plain read - no second copy of the timeout rule here. */
+		if (xpi_cap_override >= 0)
+			val->intval = xpi_cap_override;
+		else
+			val->intval = valid ? clamp(pct, 0, 100) : 100;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		val->intval = batt_val * 1000;	/* mV -> uV */
@@ -832,9 +900,9 @@ static struct backlight_device *xpi_bl;
 
 static int xpi_bl_update(struct backlight_device *bd)
 {
-	bool on = bd->props.power == BACKLIGHT_POWER_ON && bd->props.brightness > 0;
-
-	xpi_flag_set(XPI_FLAG_PANEL, on);
+	/* Not a hand-rolled power/brightness test: this also honours props.state,
+	 * so BL_CORE_SUSPENDED and BL_CORE_FBBLANK blank the panel too. */
+	xpi_flag_set(XPI_FLAG_PANEL, backlight_get_brightness(bd) > 0);
 	return 0;
 }
 
@@ -900,7 +968,10 @@ static int __init gc_init(void)
 	static u32 gc_bcm2708_peri_base;
 
 	values.flags_val = 1;
-	values.fan_val = 10;
+	/* 1.0% here previously, which is off in all but name, for however long it
+	 * takes userspace to come up. The vendor boots the fan at 100% and lets the
+	 * OSD take it down; the safety floor is the quieter version of that idea. */
+	values.fan_val = XPI_FAN_SAFE;
 	values.red_val = 100;
 	values.green_val = 100;
 	/* Seed the fan watchdog stamp as already-expired. Left at 0 it is compared
@@ -970,6 +1041,10 @@ static int __init gc_init(void)
 		goto r_sysfs;
 	}
 	if(sysfs_create_file(kobj_ref,&vol.attr)){
+		printk(KERN_INFO "Cannot create sysfs file......\n");
+		goto r_sysfs;
+	}
+	if(sysfs_create_file(kobj_ref,&cap.attr)){
 		printk(KERN_INFO "Cannot create sysfs file......\n");
 		goto r_sysfs;
 	}
@@ -1081,7 +1156,14 @@ r_sysfs:
 static void __exit gc_exit(void)
 {
 	if (gc_base){
-		GC_DEL_TIMER_SYNC(&gc_base->timer);
+		/* Not a plain delete: gc_timer() re-arms itself every tick, so a
+		 * delete can return with a tick still queued against the memory
+		 * gc_remove() is about to free. timer_shutdown_sync() makes every
+		 * later mod_timer() a no-op, which is what closes that race. The
+		 * vendor reached the same conclusion in a revision later than the
+		 * one this port started from, using a `running` flag - see
+		 * docs/experimentalpi-mirror/downloads/README.md. */
+		timer_shutdown_sync(&gc_base->timer);
 		gc_remove(gc_base);
 	}
 
@@ -1103,7 +1185,7 @@ static void __exit gc_exit(void)
 	if (xpi_led_ok)
 		led_classdev_unregister(&xpi_green_led);
 
-	GC_DEL_TIMER_SYNC(&xpi_pwr_timer);
+	timer_shutdown_sync(&xpi_pwr_timer);
 
 	if (xpi_pwr_dev)
 		input_unregister_device(xpi_pwr_dev);

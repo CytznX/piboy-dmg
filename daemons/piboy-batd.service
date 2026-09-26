@@ -1,0 +1,39 @@
+[Unit]
+Description=PiBoy DMG battery fuel gauge
+# Same reasoning as piboy-vold: the daemon exits 1 if the xpi_gamecon
+# power_supply tree or capacity_override node is absent, and with
+# Restart=always/RestartSec=5 a boot where the module loads late would otherwise
+# burn all ten attempts in ~50s and fail permanently - leaving the gauge dead
+# until someone noticed, which on a battery device is exactly when nobody does.
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+# StartLimit* must live in [Unit]. systemd silently ignores them in [Service].
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# Calibration lives in /etc/default/piboy-batd: uncomment BATD_ARGS there to
+# start logging a capture, then restart this unit. The leading - means a missing
+# file is not an error.
+EnvironmentFile=-/etc/default/piboy-batd
+ExecStart=/usr/local/sbin/piboy-batd $BATD_ARGS
+# Hand capacity back to the MCU immediately on any exit, including a SIGKILL the
+# daemon's own cleanup never sees. The driver expires the override after 60s
+# regardless, so this only shortens the window where a dead gauge is still being
+# reported - but a stale battery percentage is the one number people act on.
+ExecStopPost=+/bin/sh -c 'echo -1 > /sys/kernel/xpi_gamecon/capacity_override 2>/dev/null; true'
+# Runs as root: capacity_override is 0660 root:root, like the other xpi nodes.
+# StateDirectory creates /var/lib/piboy for fuel-gauge.json and battery-cal.json
+# and, unlike RuntimeDirectory, leaves it alone when the unit stops - the
+# persisted charge has to survive exactly that.
+StateDirectory=piboy
+Restart=always
+RestartSec=5
+# The loop finishes its current 1s sample before noticing SIGTERM; 10s is ample
+# and keeps shutdown well clear of the ~31s point where the XPi cuts the rail.
+TimeoutStopSec=10
+SyslogIdentifier=piboy-batd
+
+[Install]
+WantedBy=multi-user.target
