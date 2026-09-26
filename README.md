@@ -1,100 +1,150 @@
 # PiBoy DMG — 64-bit port
 
-Porting a PiBoy DMG (Raspberry Pi 4B 8GB handheld) off Experimental Pi's 32-bit
-RetroPie/Buster image onto 64-bit Raspberry Pi OS Trixie, after Experimental Pi
-shut down. Built 2026-08-22 → 2026-08-23.
+Experimental Pi shut down and left their PiBoy DMG handheld on a 32-bit
+RetroPie/Buster image with no support behind it. This repo is the result of
+moving one onto 64-bit Raspberry Pi OS Trixie and taking over the whole stack:
+their GPL controller driver, the daemons around it, the emulation front end,
+and the tooling to rebuild a card from scratch.
 
-Full write-up, including the traps that cost real time:
-`docs/piboy-build-doc.html`
+Hardware: Raspberry Pi 4B rev 1.4 (8 GB), XPi controller board, 3.5" 640×480
+DPI panel. Ported from their 5.10 kernel to 6.18.
+
+Full write-up, including the traps that cost real time: `docs/piboy-build-doc.html`
+
+## What works
+
+    frontend     EmulationStation under a Wayland compositor (labwc), with one
+                 status bar drawn over EVERY emulator - clock, CPU, memory,
+                 disk, temperature, battery, wired/wifi link. Themed to match
+                 the gbz35 ES theme it sits on top of.
+    emulators    Every SDL2-based emulator runs as a native Wayland client:
+                 RetroArch and its cores, PPSSPP, Aleph One, OpenTyrian,
+                 the ports. Dreamcast via lr-flycast-dev.
+    controls     Full pad, analog volume wheel -> ALSA on Experimental Pi's own
+                 curve, volume OSD with icon + percentage + level bar, power
+                 button, Start+Select escape hatch out of any wedged emulator.
+    battery      Coulomb-counting fuel gauge, not the MCU's voltage guess.
+                 Powers the device off cleanly before the pack dies.
+    thermals     Fan curve on the MCU's real units, LED trigger, throttled=0x0
+                 at a 2000 MHz overclock.
+    display      Experimental Pi's own 60 Hz DPI timing; follows the HDMI cable
+                 for panel, audio sink and an in-place ES restart.
+    driver       xpi_gamecon under DKMS, so a kernel upgrade rebuilds it rather
+                 than orphaning it. Proven across 6.18.39 -> 6.18.50.
 
 ## Current state
 
 The 1 TB card is the live system; the 32 GB card is a working rollback.
 Both share a machine-id — never boot them onto the network at the same time.
+The rollback card predates the Wayland work, DKMS and the fan fix.
 
     /            938 G on PARTUUID=e22bcd10-02   (ext4 reserve lowered to 1%)
     CPU          2000 MHz, throttled=0x0
     roms         26 G restored, checksums verified
-    driver       xpi_gamecon, ported 5.10 -> 6.18, kept rebuilt by DKMS
-    session      Wayland: labwc + waybar + EmulationStation.
-                 `sudo switch.sh kms` rolls back to plain KMS on the next boot
+    MCU          firmware 1.0.6 (version node reads 262)
+    session      Wayland by default. `sudo switch.sh kms` rolls back to plain
+                 KMS on the next boot - worth knowing, because redream only
+                 works there.
+
+## Known limitations
+
+These are decided, not open bugs:
+
+  * **The status bar cannot be hidden during a game.** Changing a layer
+    surface's state next to a fullscreen client intermittently wedges that
+    client for good — it blocks waiting for a frame callback that never
+    arrives, while the compositor itself stays healthy and keeps rendering.
+    Unrecoverable short of SIGKILL. It reproduces during ordinary play and
+    never once in ~30 scripted attempts, so `scripts/freeze-watch.sh` exists to
+    capture it rather than guess. The auto-hide hooks in `config/wayland/
+    runcommand/` are shipped but deliberately NOT installed. Costs ~7.7% of a
+    core that hiding the bar would have saved.
+  * **`layer: overlay` defeats direct scanout**, so the compositor composites
+    every frame: ~11% of a core with the bar up against ~3% without. Required —
+    wlroots raises a fullscreen window above the `top` layer, so a bar on `top`
+    is configured correctly, logs the right geometry, and is invisible.
+  * **redream cannot run under Wayland.** It statically links its own SDL built
+    with KMSDRM as the only video driver. XWayland does not help: there is no
+    X11 backend to trigger it. Batocera hit the same wall and dropped it.
+    lr-flycast-dev is the default instead — slower, but it works.
+  * **Faint horizontal banding** under the compositor. Ruled out direct scanout,
+    damage tracking, bandwidth and plane/format. Subtle; accepted.
+  * **The fuel gauge is uncalibrated**, running on generic 1S Li-ion constants
+    and a capacity borrowed from another pack. It says so on every boot. See
+    `daemons/piboy-batd.default` for the one-discharge procedure.
 
 ## Layout
 
-    driver/      xpi_gamecon.c    the port (KEY_POWER, power_supply, hwmon, leds,
-                                  ABS_VOLUME, settable bitrate)
-                 .orig / .diff    an older vendor GPL revision, and the patch
-                                  against it. The 1.0.6 installer carries a newer
-                                  one - see docs/experimentalpi-mirror/downloads/
-                 xpi_gamecon.c.*  intermediate revisions, oldest to newest
-                 dkms-setup.sh    put the driver under DKMS, then reload from the
-                                  installed path and prove the device comes back.
-                                  Run once per card, and again to publish a
-                                  source change. Kernel upgrades rebuild it.
-                 test-reload.sh   build and cycle rmmod/insmod N times, checking
-                                  for oops and for a teardown that hangs
-    daemons/     piboy-fand       fan curve, LED trigger, low-battery OSD
-                 piboy-batd       fuel gauge: integrates current, anchors on an
-                                  IR-compensated OCV curve, publishes through the
-                                  driver's capacity_override so ES/RetroArch/
-                                  upower all see it. Also owns the clean shutdown
-                                  on an empty pack. Runs uncalibrated on generic
-                                  constants; to calibrate this pack, capture with
-                                  --log (see daemons/piboy-batd.default) and fit
-                                  with scripts/fit-battery-curve.py, which writes
-                                  /var/lib/piboy/battery-cal.json
+    driver/      xpi_gamecon.c    the port: KEY_POWER, power_supply, hwmon fan,
+                                  leds, backlight, ABS_VOLUME, settable bitrate,
+                                  capacity_override
+                 .orig / .diff    an older vendor GPL revision and the patch
+                                  against it
+                 dkms-setup.sh    put the driver under DKMS, reload from the
+                                  installed path, prove the device comes back
+                 test-reload.sh   cycle rmmod/insmod N times, watching for an
+                                  oops or a teardown that hangs
+    daemons/     piboy-fand       fan curve, LED trigger, low-battery alerts
+                 piboy-batd       the fuel gauge, and the clean shutdown on an
+                                  empty pack (it lives here, not in fand, which
+                                  exits when the FAN is unwritable)
                  piboy-vold.c     volume wheel -> ALSA, blocks on evdev
-                 piboy-escaped    Start+Select escape hatch; idle screen blanking
-                 piboy-display    follows the HDMI cable: panel, audio, ES restart
+                 piboy-escaped    Start+Select escape hatch; idle blanking
+                 piboy-display    follows the HDMI cable
                  *.service        systemd units as installed
+    config/      wayland/         THE BOOT PATH: labwc + waybar + ES, mirroring
+                                  /opt/retropie/configs/all/wayland/. switch.sh
+                                  flips to plain KMS. See its own README.md
+                 working-*.txt    known-good config.txt / cmdline.txt
+                 retroarch-joypads, udev
+                 custom.toml.example
+                                  the real custom.toml carries a PSK and a
+                                  password hash and is gitignored
+    patches/     *-enable-wayland RetroArch and SDL2 rebuilt with the Wayland
+                                  backend — SDL2 was the chokepoint, and doing
+                                  it there gave every SDL2 emulator Wayland free
+                 runcommand-*     gives runcommand a pty under the compositor,
+                                  without which nothing launches at all
+                 es_systems-*     points the RetroPie config menu at the wrapper
+                                  it needs to draw under a compositor
+                 retroarch-*      showmsg-flush (kept — drives transient alerts)
+                                  and status-bar (RETIRED, waybar replaced it)
+                 others           joy2key, flycast, dxx-rebirth build fixes
+                                  ALL of these are reapplied BY HAND after a
+                                  RetroPie-Setup update. Nothing upstream
+                                  supports Wayland; these are ours to carry.
+    scripts/     fit-battery-curve.py
+                                  recovers capacity, pack resistance and the OCV
+                                  curve from one logged discharge
+                 freeze-watch.sh  captures the in-game stall described above
+                 scrape*, chd-convert, migrate-discs, neogeo-*, move-psx
+    roms/        rom-audit / rom-dedupe / rom-tidy
     migration/   capture.sh       image the original card (partclone + zstd)
                  01..03           partition, rsync, rewrite PARTUUIDs
                  02b              verify the copy with rsync -n
                  04-restore-roms  runs ON the Pi, from USB, never over network
                  piboy-cleanup.sh removes build artifacts (dry run by default)
-                 MANIFEST.txt     sha256 of the captured image
-    config/      working-*.txt    known-good config.txt / cmdline.txt
-                 custom.toml      Bookworm-era provisioning; Trixie ignores it
-                                  and uses cloud-init instead — kept as a warning
-                 wayland/         THE CURRENT BOOT PATH: labwc + waybar +
-                                  EmulationStation, mirroring /opt/retropie/
-                                  configs/all/wayland/. Status bar over every
-                                  emulator, and the terminal wrapper the RetroPie
-                                  config menu needs under a compositor.
-                                  switch.sh flips boot between this and plain
-                                  KMS. See its README.md
-                                  Volume OSD: piboy-vold publishes the wheel to
-                                  /run/piboy-volume (created by tmpfiles, since
-                                  /run is root-owned), piboy-volume-osd.sh
-                                  watches it and notifies mako, which draws the
-                                  icon + percentage + level bar (mako.ini).
-                                  Icons come from mkvolumeicons.sh - Adwaita's
-                                  are black-on-black here.
-    patches/     *-enable-wayland RetroArch and SDL2 rebuilt with the Wayland
-                                  backend — the work that made the above possible
-                 runcommand-*     gives runcommand a pty under the compositor,
-                                  without which nothing launches at all
-                 es_systems-*     points the RetroPie menu at the wrapper
-                 retroarch-*      showmsg-flush (kept, drives low-battery alerts)
-                                  and status-bar (RETIRED, waybar replaced it)
-                                  Reapply by hand after a RetroPie-Setup update.
+    instruments/ SDR (rtl_433) and SmartScope servers, launchable from ES
+    systemd/     the scrape timer
 
 ## Not here
 
-The 24 GB captured Experimental Pi's image is in `~/.local/share/piboy-backup-image/`,
-deliberately outside Dropbox so it does not sync. See
-`migration/WHERE-IS-THE-IMAGE.txt`. It is currently the only copy of *this card*,
-on one laptop disk — that is not a backup. Copy it to external media.
+The 24 GB capture of Experimental Pi's original card is in
+`~/.local/share/piboy-backup-image/`, deliberately outside Dropbox so it does
+not sync. See `migration/WHERE-IS-THE-IMAGE.txt`. It is currently the only copy
+of *this card*, on one laptop disk — that is not a backup. Copy it to external
+media.
 
-Alongside it, `exppi-archive/` holds the four stock OS images from Experimental
-Pi's download server, recovered 2026-09-25 from
-<https://archive.org/details/EXPPI>. The rest of that archive — Windows utility,
-MCU firmware 1.0.6/1.0.7, STLs — is small enough to sync and is in the repo at
-`docs/experimentalpi-mirror/downloads/`.
+Alongside it, `exppi-archive/` holds the stock OS images from Experimental Pi's
+download server, recovered 2026-09-25 from <https://archive.org/details/EXPPI>.
+The rest of that archive — their Windows utility, signed USB drivers, MCU
+firmware 1.0.6/1.0.7, STLs — is mirrored locally to
+`docs/experimentalpi-mirror/` but is **gitignored**: it is 30 MB of their
+proprietary material and this repo is public.
 
-Credentials (Pi password, Wi-Fi PSK) were deliberately NOT saved here.
+Credentials (Pi password, Wi-Fi PSK) were deliberately never committed.
 
-## Sources of record on the Pi itself
+## On the Pi itself
 
-`~/piboy-src/` on the handheld carries the same driver and daemon sources, so
-the device can rebuild its own module after a kernel update without this laptop.
+`~/piboy-src/` carries the same driver and daemon sources, so the handheld can
+rebuild its own module after a kernel update without this laptop.
