@@ -32,20 +32,6 @@ Full write-up, including the traps that cost real time: `docs/piboy-build-doc.ht
     driver       xpi_gamecon under DKMS, so a kernel upgrade rebuilds it rather
                  than orphaning it. Proven across 6.18.39 -> 6.18.50.
 
-## Current state
-
-The 1 TB card is the live system; the 32 GB card is a working rollback.
-Both share a machine-id — never boot them onto the network at the same time.
-The rollback card predates the Wayland work, DKMS and the fan fix.
-
-    /            938 G on PARTUUID=e22bcd10-02   (ext4 reserve lowered to 1%)
-    CPU          2000 MHz, throttled=0x0
-    roms         26 G restored, checksums verified
-    MCU          firmware 1.0.6 (version node reads 262)
-    session      Wayland by default. `sudo switch.sh kms` rolls back to plain
-                 KMS on the next boot - worth knowing, because redream only
-                 works there.
-
 ## Known limitations
 
 These are decided, not open bugs:
@@ -126,25 +112,3 @@ These are decided, not open bugs:
                  piboy-cleanup.sh removes build artifacts (dry run by default)
     instruments/ SDR (rtl_433) and SmartScope servers, launchable from ES
     systemd/     the scrape timer
-
-## Not here
-
-The 24 GB capture of Experimental Pi's original card is in
-`~/.local/share/piboy-backup-image/`, deliberately outside Dropbox so it does
-not sync. See `migration/WHERE-IS-THE-IMAGE.txt`. It is currently the only copy
-of *this card*, on one laptop disk — that is not a backup. Copy it to external
-media.
-
-Alongside it, `exppi-archive/` holds the stock OS images from Experimental Pi's
-download server, recovered 2026-09-25 from <https://archive.org/details/EXPPI>.
-The rest of that archive — their Windows utility, signed USB drivers, MCU
-firmware 1.0.6/1.0.7, STLs — is mirrored locally to
-`docs/experimentalpi-mirror/` but is **gitignored**: it is 30 MB of their
-proprietary material and this repo is public.
-
-Credentials (Pi password, Wi-Fi PSK) were deliberately never committed.
-
-## On the Pi itself
-
-`~/piboy-src/` carries the same driver and daemon sources, so the handheld can
-rebuild its own module after a kernel update without this laptop.
