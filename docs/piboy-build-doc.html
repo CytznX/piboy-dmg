@@ -388,7 +388,9 @@
           <tr><td>Follow the HDMI cable, both ways</td><td><span class="pill done">working</span></td><td><code>piboy-display</code> + udev</td></tr>
           <tr><td>Clock &amp; battery in the frontend</td><td><span class="pill done">working</span></td><td>patched into EmulationStation</td></tr>
           <tr><td>WiFi through the aluminium case</td><td><span class="pill done">working</span></td><td>external USB adapter &mdash; the internal radio is shielded</td></tr>
-          <tr><td>Status bar <em>over games</em></td><td><span class="pill open">not done</span></td><td>needs a compositor &mdash; and that breaks launching</td></tr>
+          <tr><td>Status bar <em>over games</em></td><td><span class="pill done">working</span></td><td><code>labwc</code> + <code>waybar</code> &mdash; see <em>The compositor</em></td></tr>
+          <tr><td>Coulomb-counting fuel gauge</td><td><span class="pill done">working</span></td><td><code>piboy-batd</code>, uncalibrated</td></tr>
+          <tr><td>Driver rebuilt on kernel upgrade</td><td><span class="pill done">working</span></td><td>DKMS</td></tr>
         </tbody>
       </table>
     </div>
@@ -635,42 +637,26 @@ time dd if=/dev/zero bs=1M count=300 2>/dev/null | sha256sum
 
       <li>
         <h3>Build the controller driver</h3>
-        <p>The GPL source lives at <code>/usr/src/xpi_gamecon-1.0</code> on the original card — 556 lines, bit-banging a two-wire protocol to the XPi microcontroller on GPIO 26/27. Three edits make it build on 6.18. Experimental Pi's Makefile also has <code>KVERSION := 'uname -r'</code> in single quotes, which expands to a literal string; use <code>$(shell uname -r)</code>.</p>
+        <p>The GPL source lives at <code>/usr/src/xpi_gamecon-1.0</code> on the original card — 556 lines, bit-banging a two-wire protocol to the XPi microcontroller on GPIO 26/27. Experimental Pi's Makefile has <code>KVERSION := 'uname -r'</code> in single quotes, which expands to a literal string; use <code>$(shell uname -r)</code>.</p>
+        <p>Two headers and one timer call are all 6.18 needs. These timers re-arm themselves, so <code>timer_shutdown_sync()</code> is the correct teardown — <code>del_timer_sync()</code> can return with the timer already scheduled again:</p>
 <pre><code>#include &lt;linux/of.h&gt;          <span class="c">// of_device.h no longer pulls this in</span>
-#include &lt;linux/version.h&gt;
 
-#if LINUX_VERSION_CODE &gt;= KERNEL_VERSION(6,16,0)
-#define GC_FROM_TIMER(p,t,m)  timer_container_of(p,t,m)
-#else
-#define GC_FROM_TIMER(p,t,m)  from_timer(p,t,m)
-#endif
-
-#if LINUX_VERSION_CODE &gt;= KERNEL_VERSION(6,15,0)
-#define GC_DEL_TIMER_SYNC(t)  timer_delete_sync(t)
-#else
-#define GC_DEL_TIMER_SYNC(t)  del_timer_sync(t)
-#endif</code></pre>
-        <p>Install it where it survives reboots:</p>
-<pre><code>sudo cp xpi_gamecon.ko /lib/modules/$(uname -r)/extra/
-sudo depmod -a
+timer_container_of(p, t, m)    <span class="c">// was from_timer()</span>
+timer_shutdown_sync(&amp;timer)    <span class="c">// self-rearming: must be shutdown, not delete</span></code></pre>
+        <p><strong>Install it with DKMS, not by hand.</strong> A kernel upgrade leaves a hand-copied module behind at the old path and the device comes back with no controller, no telemetry and no fan control, silently. Under DKMS the 6.18.39 &rarr; 6.18.50 upgrade rebuilt and loaded it unattended.</p>
+<pre><code>sudo cp -r . /usr/src/xpi_gamecon-1.0
+sudo dkms add -m xpi_gamecon -v 1.0
+sudo dkms install -m xpi_gamecon -v 1.0
 echo xpi_gamecon | sudo tee /etc/modules-load.d/xpi_gamecon.conf</code></pre>
+        <p>Set <code>AUTOINSTALL="yes"</code> in <code>dkms.conf</code> so upgrades rebuild it. Note DKMS installs to <code>updates/dkms/</code>, which outranks <code>extra/</code> — a stale hand-built <code>.ko</code> left there is silently shadowed.</p>
       </li>
 
       <li>
         <h3>Replace the fan controller</h3>
-        <p>Experimental Pi's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see <em>What the port taught</em>. Until something replaces it the fan is unmanaged, so do this before any sustained load. The daemon below reproduces Experimental Pi's <code>osd.cfg</code> bands and adds a full-speed band above 78 °C that the original lacked.</p>
-<pre><code>duty_for() {   <span class="c"># millidegrees -&gt; 0..255 PWM</span>
-    local t=$1
-    if   [ "$t" -ge 78000 ]; then echo 255   <span class="c"># 100%  (added)</span>
-    elif [ "$t" -ge 75000 ]; then echo 191   <span class="c">#  75%</span>
-    elif [ "$t" -ge 70000 ]; then echo 128   <span class="c">#  50%</span>
-    elif [ "$t" -ge 65000 ]; then echo 102   <span class="c">#  40%</span>
-    elif [ "$t" -ge 60000 ]; then echo  77   <span class="c">#  30%</span>
-    elif [ "$t" -ge 55000 ]; then echo  51   <span class="c">#  20%</span>
-    elif [ "$t" -ge 50000 ]; then echo  26   <span class="c">#  10%</span>
-    else                          echo   0
-    fi
-}</code></pre>
+        <p>Experimental Pi's <code>osd</code> binary drove the fan curve, and it cannot run on 64-bit — see <em>What the port taught</em>. Until something replaces it the fan is unmanaged, so do this before any sustained load.</p>
+        <p><strong>Write the curve in the hardware's real units.</strong> The field is not a linear PWM: 0&ndash;254 is 0.0%&ndash;25.4% power and 255 alone is 100%, so a curve written as if it were 0&ndash;255 duty runs the fan at roughly a tenth of what it says. See the trap of the same name.</p>
+<pre><code>FAN_CURVE="75000:255 72000:254 69000:240 66000:210 \
+           63000:180 60000:147 55000:110 50000:75"   <span class="c"># millidegrees:byte</span></code></pre>
         <p>Give the fan <strong>downward hysteresis</strong> or it will flap. Measured idle temperature swing on this hardware is ~2400 millidegrees, so anything less than that oscillates across a band edge every sense cycle — writing sysfs and logging each time. 3500 settles it: one transition a minute instead of one every five seconds.</p>
         <p>Run it from a systemd unit with <code>Restart=always</code> and let the script exit non-zero when the sysfs tree is missing. Do <em>not</em> use <code>ConditionPathExists</code> — a failed condition makes systemd <em>skip</em> the unit, and <code>Restart</code> never applies to something that was never started, so a boot race silently leaves you with no fan control.</p>
       </li>
@@ -872,12 +858,12 @@ awk -F'\t' 'NR==FNR{c[$1]++;next} c[$1]&gt;1' inventory inventory | cut -f2-</co
   <section>
     <div class="eyebrow">Measured</div>
     <h2>The charger, and what &minus;250 mA actually meant</h2>
-    <p>The battery reported <code>Discharging</code> at 100% with the charger plugged in, and <code>amps</code> never once read positive. That looks like a dead charge path. Chasing it produced three wrong theories before the measurement that settled it, and the sequence is worth recording because each wrong turn was individually reasonable.</p>
+    <p>The battery reported <code>Discharging</code> at 100% with the charger plugged in, and <code>amps</code> never once read positive. That looks like a dead charge path. It is not, and the measurement that settles it is not the obvious one.</p>
 
     <h3>The reading is real — prove that first</h3>
     <p>The decode is one line, and it is signed:</p>
 <pre><code>cur_val = (int)((signed char)data[8]) * 50;   <span class="c">// 50 mA per LSB</span></code></pre>
-    <p>Load-testing it is the cheapest possible discriminator between a real sensor, a stuck value and a fixed sign. Four cores at 2000 MHz moved it from <code>-250</code> to <code>-350</code> and back — responsive, therefore real. But 100 mA is far too small a delta for a load that should add 800&ndash;900 mA, which is what launched the wrong theory: that the <code>*50</code> scale factor was off by roughly 8&times;.</p>
+    <p>Load-testing it is the cheapest possible discriminator between a real sensor, a stuck value and a fixed sign. Four cores at 2000 MHz moved it from <code>-250</code> to <code>-350</code> and back — responsive, therefore real. But 100 mA is far too small a delta for a load that should add 800&ndash;900 mA, which invites the conclusion that the <code>*50</code> scale factor is wrong. It is not.</p>
 
     <div class="note warn"><strong>The decisive test is removing the charger, not adding load.</strong> Unplugged, the same reading went to <code>-1650</code> mA and the pack voltage began falling — 6.7 W at 4.05 V, exactly right for an overclocked Pi 4 with a panel and fan. The scale was never wrong. Plugged in, the charger simply carries nearly all of the load and the pack contributes a trickle near the noise floor. At 50 mA per LSB, &minus;250 mA is <em>five counts</em> from zero, and building a theory on it was over-reading the instrument.</div>
 
@@ -1079,9 +1065,7 @@ dtparam=vactive=480,vfp=16,vsync=4,vbp=12</code></pre>
 <pre><code>dtparam=clock-frequency=<span class="hl">27403200</span>
 dtparam=hactive=640,hfp=80,hsync=<span class="hl">80</span>,hbp=80
 dtparam=vactive=480,vfp=13,vsync=13,vbp=13</code></pre>
-    880 &times; 519 at 27.4032 MHz is <strong>exactly 60.00 Hz</strong>, with a sync pulse twenty times longer than the vendor's 60 Hz line and a pixel clock <em>below</em> their 32 MHz &mdash; so more signal-integrity margin than stock, not less. Verified on hardware: columns gone, cadence judder gone.
-    <br><br>
-    Worth knowing the diagnostic path, because every instinct pointed the wrong way. The artefact appeared hours after an unrelated change, so the two most recent display edits were the obvious suspects &mdash; and reverting both (a driver change and a dither setting) changed nothing. Restoring the vendor's 70 Hz timings improved it dramatically but not completely, which is what identified the porches as the cause <em>and</em> revealed a marginal connection underneath that tight timing had been amplifying. Reseat the ribbon if any of it remains.</div>
+    880 &times; 519 at 27.4032 MHz is <strong>exactly 60.00 Hz</strong>, with a sync pulse twenty times longer than the vendor's 60 Hz line and a pixel clock <em>below</em> their 32 MHz &mdash; so more signal-integrity margin than stock, not less. Verified on hardware: columns gone, cadence judder gone.</div>
 
 
     <h3>Pin budget</h3>
@@ -1107,22 +1091,23 @@ dtparam=vactive=480,vfp=13,vsync=13,vbp=13</code></pre>
           <tr><td><code>battery</code></td><td class="num">4115</td><td>millivolts, single-cell Li-ion</td></tr>
           <tr><td><code>percent</code></td><td class="num">95</td><td>state of charge</td></tr>
           <tr><td><code>amps</code></td><td class="num">−200</td><td>positive charging, negative discharging</td></tr>
-          <tr><td><code>fan</code></td><td class="num">0–255</td><td>PWM duty — <strong>not</strong> a percentage</td></tr>
+          <tr><td><code>fan</code></td><td class="num">0–255</td><td><strong>tenths of a percent</strong>: 0–254 is 0.0–25.4%, 255 is 100%</td></tr>
           <tr><td><code>red</code>, <code>green</code></td><td class="num">0–255</td><td>front LED brightness</td></tr>
           <tr><td><code>volume</code></td><td class="num">100</td><td>wheel position</td></tr>
-          <tr><td><code>version</code></td><td class="num">261</td><td>XPi firmware</td></tr>
+          <tr><td><code>version</code></td><td class="num">262</td><td>XPi firmware &mdash; <code>0x106</code>, i.e. 1.0.6 (was 261 / 1.0.5)</td></tr>
         </tbody>
       </table>
     </div>
 
-    <div class="note">The <code>fan</code> scale catches people out. Experimental Pi's <code>osd.cfg</code> lists its bands as percentages, so a configured 20 % appears here as <code>51</code>. Anything that treats the node as 0–100 will run the fan at roughly 40 % of what you asked for.</div>
+    <div class="note"><strong>The <code>fan</code> scale catches people out, and it is worse than it looks.</strong> It is not a 0&ndash;255 duty cycle at all &mdash; 0&ndash;254 encodes 0.0%&ndash;25.4% power and 255 alone means 100%. Treating it as a linear PWM, as this port did for a month, runs the fan at roughly a tenth of the intended power at every setting. See the trap of the same name.</div>
   </section>
 
   <section>
     <div class="eyebrow">Lessons</div>
     <h2>What the port taught</h2>
-    <p>Five of these started as defects and ended as design decisions; the last three looked like defects and were not. Collected because each one is reusable on any similar device, and several delete userspace code rather than adding it.</p>
-    <h3>Replacing Experimental Pi's OSD — mostly a solved problem</h3>
+    <p>Some of these started as defects and ended as design decisions; others looked like defects and were not. Collected because each is reusable on any similar device, and several delete userspace code rather than adding it.</p>
+    <p>How the overlay was eventually replaced is its own section — see <em>The compositor: one bar over everything</em>.</p>
+    <h3>Replacing Experimental Pi's OSD</h3>
     <p>The <code>osd</code> binary is a 32-bit armhf ELF linking <code>/opt/vc/lib/libbcm_host.so</code>, <code>libvchiq_arm.so</code> and <code>libvcos.so</code> — the legacy Broadcom VideoCore userland. That stack does not exist on 64-bit Raspberry Pi OS, dispmanx does not work under full KMS anyway, and multiarch cannot save it because those libraries were never ported. It will not run again.</p>
     <p>But it turns out it was doing four jobs, and only one of them was graphics:</p>
 
@@ -1134,35 +1119,17 @@ dtparam=vactive=480,vfp=13,vsync=13,vbp=13</code></pre>
           <tr><td>Status LED</td><td><code>leds</code> class — the <em>kernel</em> animates it</td></tr>
           <tr><td>Volume wheel</td><td><code>piboy-vold</code>, blocking on the <code>ABS_VOLUME</code> device</td></tr>
           <tr><td>Battery reporting</td><td><code>power_supply</code> class — <em>better</em> than the original</td></tr>
-          <tr><td>Clean shutdown on switch</td><td><code>piboy-fand</code> watching status bit <code>0x40</code></td></tr>
-          <tr><td>Volume slider on screen</td><td><code>piboy-vold</code> -&gt; RetroArch <code>SHOW_MSG</code> (widgets off)</td></tr>
-          <tr><td>Battery messages on screen</td><td><code>piboy-fand</code> -&gt; RetroArch <code>SHOW_MSG</code></td></tr>
-          <tr><td>Always-visible icon strip</td><td>not reimplemented — see below</td></tr>
+          <tr><td>Clean shutdown on switch</td><td><code>KEY_POWER</code> from the driver &rarr; logind (not a daemon &mdash; see the trap)</td></tr>
+          <tr><td>Volume slider on screen</td><td><code>mako</code> on the compositor&apos;s overlay layer</td></tr>
+          <tr><td>Battery messages on screen</td><td><code>piboy-fand</code> &rarr; RetroArch <code>SHOW_MSG</code> (transient alerts only)</td></tr>
+          <tr><td>Always-visible icon strip</td><td><code>waybar</code> on a compositor &mdash; see <em>The compositor</em></td></tr>
         </tbody>
       </table>
     </div>
 
+    <p>All eight are covered now, and only the last one needed a compositor. The rest are standard kernel subsystems &mdash; which is the point: each registration deleted userspace code rather than adding it.</p>
+
     <p>Exposing the battery through the kernel's standard interface is a genuine improvement on what Experimental Pi shipped: instead of a proprietary sysfs tree only their binary understood, every tool on the system can read it.</p>
-
-    <h3>Drawing over a running game without dispmanx</h3>
-    <p>The obstacle is not drawing, it is <strong>DRM master exclusivity</strong>. The DPI CRTC has plenty of free overlay planes (<code>plane-1</code> is the primary; <code>plane-0</code>, <code>plane-2…9</code> sit unused), but only one process may hold DRM master on a CRTC, and EmulationStation and RetroArch each take it via SDL's KMSDRM backend. An independent overlay daemon cannot commit to those planes while a game owns the display. dispmanx let Experimental Pi sidestep exactly this.</p>
-    <p>The cheap way through is to ask the app that <em>does</em> own the display to draw for you. RetroArch ships a UDP command interface:</p>
-<pre><code><span class="c"># retroarch.cfg</span>
-network_cmd_enable = "true"
-network_cmd_port   = "55355"
-
-<span class="c"># Widgets render every SHOW_MSG as its own card, so a wheel sweep stacks
-# dozens of them. Plain OSD draws one line that replaces itself - which is
-# what a volume slider wants. Note this is global: it also turns off the
-# achievement and fast-forward widgets.</span>
-menu_enable_widgets = "false"
-
-<span class="c"># push a message onto the running game — no netcat needed</span>
-exec 3&lt;&gt;/dev/udp/127.0.0.1/55355 &amp;&amp; printf "SHOW_MSG %s" "Volume: 45%" &gt;&amp;3</code></pre>
-    <p>Ownership is split by which daemon owns the event. <code>piboy-vold</code> draws the volume slider, because it is the process holding the wheel's evdev fd; it renders the position as <code>Volume [========--------] 50%</code>. <code>piboy-fand</code> fires the same mechanism when the battery crosses 25 / 15 / 10 / 5% while discharging — each threshold once, re-arming above 30%. A low-battery alert that finds you mid-game is arguably more useful than Experimental Pi's static meter, which you had to look at.</p>
-    <p>For the menu itself, <code>menu_battery_level_enable</code> shows charge in RGUI's top-right — but only alongside <code>menu_timedate_enable</code>, since in RGUI they share one status line. And note RetroPie's EmulationStation has <em>no</em> status display of any kind: no clock, no battery, nothing in the binary to enable.</p>
-    <div class="note"><strong>Superseded for the bar, kept for alerts.</strong> A compositor now owns DRM master and draws a real layer-shell bar over everything &mdash; see <em>The compositor: one bar over everything</em> below, which is what this section was reasoning towards. The <code>SHOW_MSG</code> path stays, because it is not a status bar: it is how a transient alert reaches whatever is running, and the flush patch above is what lets it replace rather than queue.</div>
-
 
     <h3>Measured: leave the bit-bang clock alone</h3>
     <p>The driver busy-spins in <code>udelay()</code> to clock its 2-wire protocol, and the half-period is a compile-time constant. Arithmetic suggests it costs a fifth of a core permanently, which makes lowering it look like the biggest available win. Make it a writable module parameter, add <em>cumulative</em> CRC counters (Experimental Pi's <code>lastgood</code>/<code>lasterror</code> are consecutive-run counters and cannot express a rate), and sweep it:</p>
