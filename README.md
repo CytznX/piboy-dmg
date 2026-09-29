@@ -9,7 +9,9 @@ and the tooling to rebuild a card from scratch.
 Hardware: Raspberry Pi 4B rev 1.4 (8 GB), XPi controller board, 3.5" 640×480
 DPI panel. Ported from their 5.10 kernel to 6.18.
 
-Full write-up, including the traps that cost real time: `docs/piboy-build-doc.html`
+**[Read the full write-up](https://cytznx.github.io/piboy-dmg/piboy-build-doc.html)** — twenty traps that cost real time, the build sequence, the compositor, and what is still
+unsolved. Source: `docs/piboy-build-doc.html`, served by GitHub Pages from `main:/docs`,
+so it tracks this branch.
 
 ## What works
 
